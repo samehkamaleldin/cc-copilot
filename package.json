@@ -1,0 +1,39 @@
+{
+  "name": "cc-copilot",
+  "version": "0.1.0",
+  "description": "Drive Claude Code (and any Anthropic-Messages client) with your GitHub Copilot subscription. A local translating proxy + cross-platform service.",
+  "type": "module",
+  "bin": {
+    "cc-copilot": "./bin/cli.mjs"
+  },
+  "scripts": {
+    "serve": "node bin/cli.mjs serve",
+    "start": "node bin/cli.mjs start",
+    "status": "node bin/cli.mjs status"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src",
+    "config",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "github-copilot",
+    "copilot",
+    "anthropic",
+    "proxy",
+    "llm-gateway",
+    "foundry"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "copilot-api": "latest"
+  }
+}

@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Runtime data / logs (created at runtime under the user data dir, but ignore any local copies)
+*.log
+.cc-copilot-data/
+data/
+logs/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Env
+.env
+.env.local

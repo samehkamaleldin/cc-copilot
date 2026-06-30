@@ -1,0 +1,27 @@
+{
+  "$schema": "./models.schema.json",
+  "ports": {
+    "shim": 4142,
+    "copilotApi": 4141
+  },
+  "//aliases": "Claude Code tier aliases -> real Copilot model id. Dashed canonical ids make Claude Code label them correctly (e.g. 'Opus 4.8'). The [1m] suffix asks Claude Code to budget the 1M context window; the shim strips it before the request reaches Copilot.",
+  "aliases": {
+    "opus": "claude-opus-4-8[1m]",
+    "sonnet": "claude-sonnet-5[1m]",
+    "haiku": "claude-haiku-4-5",
+    "fable": "gpt-5.5"
+  },
+  "//defaultModel": "Session default written to the Claude `model` setting.",
+  "defaultModel": "opus",
+
+  "//responsesApiModels": "Models that ONLY work on Copilot's /v1/responses endpoint (OpenAI Responses API). The shim translates Anthropic Messages <-> Responses for these.",
+  "responsesApiModels": ["gpt-5.5"],
+
+  "//discovery": "Curated model list exposed on GET /v1/models. `id` matches copilot-api's upstream (dotted) id; `canonical` is the dashed id Claude Code recognises. Non-claude ids are re-exposed under a synthetic 'anthropic-copilot-' prefix so Claude Code's gateway discovery keeps them. Discovery is OFF in Foundry mode (the default), so this is used only if you switch to gateway mode.",
+  "discovery": [
+    { "id": "claude-opus-4.8",  "canonical": "claude-opus-4-8",  "name": "Claude Opus 4.8" },
+    { "id": "claude-sonnet-5",  "canonical": "claude-sonnet-5",  "name": "Claude Sonnet 5" },
+    { "id": "claude-haiku-4.5", "canonical": "claude-haiku-4-5", "name": "Claude Haiku 4.5" },
+    { "id": "gpt-5.5",          "canonical": "gpt-5.5",          "name": "GPT-5.5" }
+  ]
+}
