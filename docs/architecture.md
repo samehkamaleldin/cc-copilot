@@ -85,3 +85,134 @@ Trade-off: provider mode disables Claude Code's **gateway model discovery**, so
 the `/model` picker is populated from the alias env vars
 (`ANTHROPIC_DEFAULT_*_MODEL`) rather than auto-discovered. All four models remain
 selectable by alias.
+
+---
+
+## Authentication & token flow
+
+There are two distinct credentials. Keeping them straight explains most auth
+issues (see [gotchas §5](gotchas.md#5-authentication--login)).
+
+```
+                        one-time, interactive
+  cc-copilot auth ─────────────────────────────▶ GitHub device flow
+                                                       │ stores
+                                                       ▼
+                                          GitHub OAuth token (long-lived)
+                                                       │  copilot-api exchanges
+                                                       ▼  + auto-refreshes
+                                          Copilot token  "tid=…"  (short-lived)
+                                                       │  GET /token (localhost:4141)
+                                                       ▼
+   shim ── Authorization: Bearer <copilot-token> ──▶ api.githubcopilot.com
+           + Editor-Version / Copilot-Integration-Id headers
+```
+
+- **`cc-copilot auth`** runs `copilot-api auth`, which prints a device code +
+  URL. You approve once; the GitHub token is persisted by copilot-api in its own
+  data dir.
+- **copilot-api** exchanges that for short-lived Copilot tokens and refreshes
+  them transparently. It exposes `GET /token` so the shim can read the current
+  one.
+- **The shim** fetches the token per request batch and calls Copilot directly
+  for the `/v1/messages` and `/v1/responses` paths. Editor-identifying headers
+  are required (`COPILOT_HEADERS`).
+
+Claude Code itself authenticates to the **shim** using Foundry provider mode
+(`ANTHROPIC_FOUNDRY_API_KEY`), whose value the shim ignores — the real Copilot
+credential never leaves copilot-api ⇄ shim.
+
+---
+
+## Request lifecycle
+
+What happens to a single `POST /v1/messages` from Claude Code:
+
+```
+1. Claude Code sends Anthropic Messages JSON (Foundry mode) to shim :4142
+       body: { model, system, messages[…, {role:"system", …}], thinking,
+               context_management, output_config, max_tokens, … }
+
+2. shim.resolveModel(model)
+       strip "anthropic-copilot-" prefix → strip "[1m]" → apply alias → strip "[1m]"
+       e.g.  "opus" → "claude-opus-4-8[1m]" → "claude-opus-4-8"
+
+3. route by resolved id:
+   ├─ responsesApiModels.has(id)   → Responses path  (translate ⇄, see below)
+   ├─ /^claude-/                    → native path
+   └─ else                          → forward to copilot-api /chat/completions
+
+4a. NATIVE path (claude-*):
+      hoistSystemMessages(body)            # trailing role:system → top-level system
+      drop non-whitelisted fields          # context_management, output_config, …
+      GET copilot-api:4141/token           # current Copilot bearer
+      POST api.githubcopilot.com/v1/messages  (Bearer + editor headers)
+      pipe Copilot's response/stream straight back  (no response parsing)
+
+4b. RESPONSES path (gpt-5.5):
+      anthropicToResponses(body)           # messages→input, system→instructions,
+                                           # max_tokens→max_output_tokens,
+                                           # output_config.effort→reasoning.effort (max→xhigh)
+      GET /token ; POST /v1/responses
+      stream  → translate Responses SSE → Anthropic SSE  (streamResponsesToAnthropic)
+      non-stream → responsesToAnthropic()  # output[type=message].content[output_text]
+```
+
+`GET /v1/models` (discovery) and `GET /healthz` are handled directly by the shim.
+
+---
+
+## Component internals
+
+### `src/shim.mjs` — `createShimServer(cfg, log)`
+Pure, dependency-free Node `http` server. Everything is closed over `cfg`
+(ports, aliases, `responsesApiModels`, `canonicalById`, `discoveryAllow`) so it's
+unit-testable without globals. Key functions:
+
+| Function | Role |
+| -------- | ---- |
+| `resolveModel` | prefix/`[1m]`/alias normalisation (order matters — gotchas §2.3) |
+| `hoistSystemMessages` | move in-array system turns to top-level `system` |
+| `handleClaudeNative` | whitelist-drop + native `/v1/messages` + pipe |
+| `anthropicToResponses` / `responsesToAnthropic` | format translation |
+| `streamResponsesToAnthropic` | SSE translation with cross-chunk `eventType` |
+| `handleModelsDiscovery` | curated `/v1/models` with dashed canonical ids |
+| `forwardToCopilotApi` | fallback proxy to `:4141` |
+
+### `src/daemon.mjs` — `runDaemon()`
+Spawns `copilot-api` as a child, `waitForPort(4141)`, then starts the shim. On
+child exit/error it tears down and `process.exit(1)` so the OS service manager
+restarts the stack. Handles `SIGTERM`/`SIGINT` for clean stop. Logs to
+`<dataDir>/logs/{daemon,copilot-api,shim}.log`.
+
+### `src/config.mjs` — `loadConfig()`
+Merges bundled `config/models.json` ← user `<dataDir>/models.json` ← env
+(`CC_COPILOT_SHIM_PORT`, `CC_COPILOT_API_PORT`). Derives `canonicalById` and
+`discoveryAllow`. Cached; `resetConfigCache()` for tests.
+
+### `src/claude-config.mjs`
+`installClaudeConfig()` merges the Foundry `env` block + default `model` into
+`~/.claude/settings.json`, **preserving all other keys**. `uninstallClaudeConfig()`
+removes exactly the managed keys (`managedEnvKeys()`), so it's reversible and
+won't clobber the user's permissions/plugins/statusline.
+
+### `src/service.mjs` — `getService()`
+Dispatches to `macos` (launchd plist), `linux` (systemd user unit), or `windows`
+(Scheduled Task). Each exposes `install/uninstall/start/stop/status`. The service
+always runs `node bin/cli.mjs serve`.
+
+---
+
+## Failure modes & resilience
+
+| Failure | Behaviour |
+| ------- | --------- |
+| Not authenticated | `waitForPort` times out; daemon logs "run cc-copilot auth" and exits → service retries. |
+| copilot-api crashes / token refresh fails | daemon exits → service restarts whole stack (throttled). |
+| Copilot upstream error | shim returns the upstream status + body unmodified (so Claude Code's own retry/error wording still matches). |
+| Bad/oversized model prompt | passes through; Copilot enforces its own context limit. |
+| Port already in use | shim/daemon error in logs; change ports in `models.json`. |
+| Unknown model id | not claude-*, not in responses set → forwarded to copilot-api `/chat/completions` (may 400 if Copilot doesn't serve it there). |
+
+See [troubleshooting.md](troubleshooting.md) for fixes and
+[gotchas.md](gotchas.md) for the underlying quirks.

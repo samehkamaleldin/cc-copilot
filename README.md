@@ -78,6 +78,16 @@ The GitHub auth + Copilot token refresh is handled by
 [`copilot-api`](https://github.com/ericc-ch/copilot-api), which cc-copilot runs
 as a child process.
 
+### Documentation
+
+| Doc | What's in it |
+| --- | ------------ |
+| [docs/architecture.md](docs/architecture.md) | How every piece works: components, the auth/token flow, the full request lifecycle, and failure modes. |
+| [docs/gotchas.md](docs/gotchas.md) | **The hard-won quirks** — protocol, model ids, endpoint routing, auth/login, discovery, streaming, effort, service. Read this before extending or debugging. |
+| [docs/models.md](docs/models.md) | Model/alias/port config format and how to add models. |
+| [docs/platforms.md](docs/platforms.md) | The background service on macOS / Linux / Windows; data & log locations. |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Symptom → fix, with links into the gotchas. |
+
 ---
 
 ## CLI
