@@ -8,7 +8,7 @@
 # CLI, then runs auth + install.
 set -euo pipefail
 
-REPO_URL="${CC_COPILOT_REPO:-https://github.com/your-org/cc-copilot.git}"
+REPO_URL="${CC_COPILOT_REPO:-git@github.com:samehkamaleldin/cc-copilot.git}"
 INSTALL_DIR="${CC_COPILOT_HOME:-$HOME/.cc-copilot/app}"
 
 info() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }

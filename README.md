@@ -26,21 +26,31 @@ GPT‑5.5, all billed through your existing Copilot subscription.
 
 **Prerequisites:** Node.js ≥ 20, git, and [Claude Code](https://code.claude.com) installed.
 
-### macOS / Linux
+### Install (private repo — clone over SSH)
+
+The repo is private, so clone it with your GitHub SSH access and run the local
+installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/your-org/cc-copilot/main/install.sh | bash
-cc-copilot auth        # one-time GitHub Copilot device login
-cc-copilot install     # configure Claude Code + start the background service
+git clone git@github.com:samehkamaleldin/cc-copilot.git
+cd cc-copilot
+npm install            # or: ./install.sh  (also links the `cc-copilot` CLI onto PATH)
+node bin/cli.mjs auth      # one-time GitHub Copilot device login
+node bin/cli.mjs install   # configure Claude Code + start the background service
 ```
 
-### Windows (PowerShell)
+`./install.sh` (macOS/Linux) or `install.ps1` (Windows) additionally links a
+`cc-copilot` command onto your PATH so you can drop the `node bin/cli.mjs` prefix.
 
-```powershell
-irm https://raw.githubusercontent.com/your-org/cc-copilot/main/install.ps1 | iex
-cc-copilot auth
-cc-copilot install
-```
+> **Once this repo is public**, the one-liners below will work; until then use the
+> clone method above (`raw.githubusercontent.com` requires auth for private repos).
+>
+> ```bash
+> # macOS / Linux
+> curl -fsSL https://raw.githubusercontent.com/samehkamaleldin/cc-copilot/main/install.sh | bash
+> # Windows (PowerShell)
+> irm https://raw.githubusercontent.com/samehkamaleldin/cc-copilot/main/install.ps1 | iex
+> ```
 
 Then just run **`claude`** — no login screen, and the `/model` picker offers:
 

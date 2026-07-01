@@ -106,10 +106,15 @@ whole reason the shim has three routes.
 | Model family            | Works on                         | Notes |
 | ----------------------- | -------------------------------- | ----- |
 | `claude-*`              | `/v1/messages` **and** `/chat/completions` | Native Anthropic format on `/v1/messages` — preferred (no translation). |
-| `gpt-5.5`               | `/v1/responses` **only**         | `model is not accessible via the /chat/completions endpoint`. OpenAI Responses API. |
-| `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex` | `/v1/responses` only (and 5.4 needs `max_completion_tokens`) | Cut from cc-copilot's default set. |
-| `gpt-4.1`, `gpt-4o`, `gpt-5-mini` | `/chat/completions`      | Older; cut from default set. |
+| `gpt-5.5`               | `/v1/responses` **only**         | `model is not accessible via the /chat/completions endpoint`. OpenAI Responses API. Cut targets: this is the only GPT in the default set. |
+| `gpt-5.4-mini`, `gpt-5.3-codex` | `/v1/responses` **only**  | Same "not accessible via /chat/completions" error as `gpt-5.5`. Not in the default set. |
+| `gpt-5.4`               | `/chat/completions` (rejects `max_tokens`) | Accessible on `/chat/completions` but errors `Use 'max_completion_tokens' instead`. Not in the default set; would need a param rename to use via the fallback path. |
+| `gpt-4.1`, `gpt-4o`, `gpt-5-mini`, `gpt-4o-mini` | `/chat/completions` | Verified callable. Not in the default set. |
 | `text-embedding-*`, `trajectory-compaction`, `*-picker` | special / non-chat | excluded from discovery. |
+
+> These are **observed** on one Copilot subscription at one point in time, not a
+> guaranteed contract. Copilot changes its catalog and per-endpoint routing; always
+> re-probe (`docs/models.md`) before relying on a model.
 
 **Gotcha:** a model appearing in `GET /v1/models` does **not** mean it's callable
 on `/chat/completions`. Always probe before adding (`docs/models.md` shows how).
@@ -122,9 +127,15 @@ where the **assistant text** lives in the item with `type:"message"` →
 must skip. The shim translates both directions (`anthropicToResponses` /
 `responsesToAnthropic`).
 
-### 3.2 `gpt-5.4` (if you re-add it) needs `max_completion_tokens`
-Newer OpenAI models reject `max_tokens` with
+### 3.2 `gpt-5.4` on `/chat/completions` rejects `max_tokens`
+Observed: `gpt-5.4` on `/chat/completions` returns
 `Unsupported parameter: 'max_tokens' … Use 'max_completion_tokens' instead`.
+The shim's fallback path forwards `max_tokens` unchanged, so `gpt-5.4` is **not**
+usable via the fallback as-is — you'd need to rename the field for that model, or
+route it through the Responses API instead. (Untested whether `gpt-5.4` is served
+on `/v1/responses`.) `gpt-5.5` — the model cc-copilot actually uses — is on
+`/v1/responses`, where the field is `max_output_tokens`, so this doesn't apply to
+the default set.
 
 ---
 
@@ -211,7 +222,9 @@ deployment**: no login wizard, no `/logout`, pure provider credential
 robust fix and what cc-copilot uses. Foundry speaks the **Anthropic Messages
 format**, so the shim needs no changes.
 
-- You **cannot** set both `ANTHROPIC_BASE_URL` and `CLAUDE_CODE_USE_FOUNDRY`.
+- If both `ANTHROPIC_BASE_URL` and `CLAUDE_CODE_USE_FOUNDRY` are set, the provider
+  variable wins and `ANTHROPIC_BASE_URL` is ignored for routing. cc-copilot sets
+  only the Foundry vars to avoid ambiguity.
 - Provider mode **disables gateway model discovery** (§4 of architecture; the
   picker is then driven by `ANTHROPIC_DEFAULT_*_MODEL`).
 - `ANTHROPIC_FOUNDRY_BASE_URL` may end in a vendor path in real Azure

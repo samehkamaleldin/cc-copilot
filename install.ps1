@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 function Info($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Die($m)  { Write-Host "Error: $m" -ForegroundColor Red; exit 1 }
 
-$RepoUrl    = if ($env:CC_COPILOT_REPO) { $env:CC_COPILOT_REPO } else { "https://github.com/your-org/cc-copilot.git" }
+$RepoUrl    = if ($env:CC_COPILOT_REPO) { $env:CC_COPILOT_REPO } else { "git@github.com:samehkamaleldin/cc-copilot.git" }
 $InstallDir = if ($env:CC_COPILOT_HOME) { $env:CC_COPILOT_HOME } else { Join-Path $HOME ".cc-copilot\app" }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Die "node (>=20) is required. Install from https://nodejs.org" }

@@ -114,9 +114,9 @@ issues (see [gotchas §5](gotchas.md#5-authentication--login)).
 - **copilot-api** exchanges that for short-lived Copilot tokens and refreshes
   them transparently. It exposes `GET /token` so the shim can read the current
   one.
-- **The shim** fetches the token per request batch and calls Copilot directly
-  for the `/v1/messages` and `/v1/responses` paths. Editor-identifying headers
-  are required (`COPILOT_HEADERS`).
+- **The shim** fetches the token (from `GET /token`) for each request and calls
+  Copilot directly for the `/v1/messages` and `/v1/responses` paths. Editor-
+  identifying headers are required (`COPILOT_HEADERS`).
 
 Claude Code itself authenticates to the **shim** using Foundry provider mode
 (`ANTHROPIC_FOUNDRY_API_KEY`), whose value the shim ignores — the real Copilot
