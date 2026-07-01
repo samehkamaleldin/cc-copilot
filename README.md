@@ -97,6 +97,13 @@ as a child process.
 | [docs/platforms.md](docs/platforms.md) | The background service on macOS / Linux / Windows; data & log locations. |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Symptom → fix, with links into the gotchas. |
 
+### Teach an AI agent to do it
+
+An **agent skill** ships in [`skills/`](skills/) so GitHub Copilot, Claude Code,
+or opencode can perform the setup and troubleshoot for the user — including the
+gotchas playbook. See [skills/README.md](skills/README.md) for how to load it
+(GitHub Copilot users: run `/cc-copilot-setup` in Agent mode).
+
 ---
 
 ## CLI
