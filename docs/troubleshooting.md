@@ -123,8 +123,10 @@ cc-copilot doctor          # ports / auth / config
   ([gotchas §8.1](gotchas.md#81-launchd-has-a-minimal-path))
 - **Linux:** the service dies at logout → enable lingering:
   `loginctl enable-linger $USER`. ([gotchas §8.2](gotchas.md#82-systemd-user-services-stop-at-logout-without-lingering))
-- **Windows:** ensure the Scheduled Task exists (`schtasks /Query /TN cc-copilot`)
-  and that `node` is on PATH for the logon task.
+- **Windows:** ensure the per-user logon task exists
+  (`Get-ScheduledTask -TaskName cc-copilot` shows its state) and that `node` is on
+  PATH for the logon task. If `cc-copilot install` reported a registration error,
+  it now fails loudly instead of silently — re-run it and read the message.
 - The daemon **intentionally** exits when copilot-api dies so the service
   restarts the whole stack — brief blips during token refresh are normal.
   ([gotchas §8.4](gotchas.md#84-the-daemon-exits-when-copilot-api-dies))
@@ -179,10 +181,23 @@ cc-copilot logs                         # reproduce, then copy the relevant line
 git -C ~/.cc-copilot/app pull && cc-copilot restart
 ```
 
+```powershell
+# Windows (PowerShell)
+git -C $HOME\.cc-copilot\app pull; cc-copilot restart
+```
+
 ## Fully removing cc-copilot
 
 ```bash
+# macOS / Linux
 cc-copilot uninstall          # removes service + Claude config keys
-rm -rf ~/.cc-copilot ~/.local/share/cc-copilot
+rm -rf ~/.cc-copilot ~/.local/share/cc-copilot ~/.local/bin/cc-copilot
+# copilot-api credentials (separate) live in copilot-api's own data dir
+```
+
+```powershell
+# Windows (PowerShell)
+cc-copilot uninstall          # removes the logon task + Claude config keys
+Remove-Item -Recurse -Force $HOME\.cc-copilot, $env:LOCALAPPDATA\cc-copilot, $HOME\bin\cc-copilot.cmd
 # copilot-api credentials (separate) live in copilot-api's own data dir
 ```

@@ -22,6 +22,31 @@ function sh(cmd, args, opts = {}) {
   return spawnSync(cmd, args, { encoding: "utf8", ...opts });
 }
 
+/** Quote a value as a single-quoted PowerShell string literal. */
+function psLiteral(s) {
+  return "'" + String(s).replace(/'/g, "''") + "'";
+}
+
+/**
+ * Run a PowerShell script from a temp file (avoids nested-quote escaping) and
+ * check the exit code. Throws on failure unless `allowFail` is set.
+ */
+function ps(script, what, { allowFail = false } = {}) {
+  const exe = process.platform === "win32" ? "powershell" : "pwsh";
+  const tmp = path.join(os.tmpdir(), `cc-copilot-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`);
+  fs.writeFileSync(tmp, script);
+  try {
+    const r = sh(exe, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", tmp]);
+    if (!allowFail && r.status !== 0) {
+      const msg = ((r.stderr || r.stdout) || "").trim() || `exit code ${r.status}`;
+      throw new Error(`failed to ${what}: ${msg}`);
+    }
+    return r;
+  } finally {
+    try { fs.unlinkSync(tmp); } catch {}
+  }
+}
+
 /* ----------------------------- macOS (launchd) ---------------------------- */
 const macos = {
   plistPath: () => path.join(os.homedir(), "Library", "LaunchAgents", `${LABEL}.plist`),
@@ -114,33 +139,51 @@ WantedBy=default.target
   },
 };
 
-/* --------------------------- Windows (schtasks) --------------------------- */
+/* --------------------------- Windows (Scheduled Task) --------------------- */
+// Registered as a per-user logon task via the ScheduledTasks PowerShell module.
+// This works for a standard (non-elevated) user, unlike
+// `schtasks /Create /SC ONLOGON /RL LIMITED`, which fails with
+// "Access is denied" without administrator rights.
 const windows = {
   taskName: "cc-copilot",
 
   install() {
-    // Run at logon, restart-on-failure is approximated by KeepAlive in the daemon
-    // plus the task's own retry. The command launches the serve loop detached.
-    const cmd = `"${nodePath()}" "${SERVE_SCRIPT}" serve`;
-    sh("schtasks", [
-      "/Create", "/F",
-      "/SC", "ONLOGON",
-      "/RL", "LIMITED",
-      "/TN", windows.taskName,
-      "/TR", cmd,
-    ]);
+    fs.mkdirSync(logDir(), { recursive: true });
+    const script = [
+      `$ErrorActionPreference = 'Stop'`,
+      `$node = ${psLiteral(nodePath())}`,
+      `$serve = ${psLiteral(SERVE_SCRIPT)}`,
+      `$action = New-ScheduledTaskAction -Execute $node -Argument ('"' + $serve + '" serve')`,
+      `$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME`,
+      `$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartInterval (New-TimeSpan -Minutes 1) -RestartCount 3 -ExecutionTimeLimit ([TimeSpan]::Zero)`,
+      `Register-ScheduledTask -TaskName ${psLiteral(windows.taskName)} -Action $action -Trigger $trigger -Settings $settings -Description 'cc-copilot proxy (GitHub Copilot to Claude Code bridge)' -Force | Out-Null`,
+    ].join("\n");
+    ps(script, "register scheduled task");
     windows.start();
     return windows.taskName;
   },
   uninstall() {
-    sh("schtasks", ["/End", "/TN", windows.taskName]);
-    sh("schtasks", ["/Delete", "/F", "/TN", windows.taskName]);
+    ps(
+      `Stop-ScheduledTask  -TaskName ${psLiteral(windows.taskName)} -ErrorAction SilentlyContinue; ` +
+      `Unregister-ScheduledTask -TaskName ${psLiteral(windows.taskName)} -Confirm:$false -ErrorAction SilentlyContinue`,
+      "remove scheduled task",
+      { allowFail: true },
+    );
   },
-  start() { sh("schtasks", ["/Run", "/TN", windows.taskName]); },
-  stop() { sh("schtasks", ["/End", "/TN", windows.taskName]); },
+  start() {
+    ps(`Start-ScheduledTask -TaskName ${psLiteral(windows.taskName)}`, "start scheduled task");
+  },
+  stop() {
+    ps(`Stop-ScheduledTask -TaskName ${psLiteral(windows.taskName)}`, "stop scheduled task", { allowFail: true });
+  },
   status() {
-    const r = sh("schtasks", ["/Query", "/TN", windows.taskName]);
-    return (r.stdout || r.stderr || "unknown").trim().split("\n").pop();
+    const r = ps(
+      `(Get-ScheduledTask -TaskName ${psLiteral(windows.taskName)} -ErrorAction SilentlyContinue).State`,
+      "query scheduled task",
+      { allowFail: true },
+    );
+    const state = (r.stdout || "").trim();
+    return state || "not installed";
   },
 };
 

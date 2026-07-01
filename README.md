@@ -130,6 +130,22 @@ override without editing the repo, copy it to the per-user data dir
 (`cc-copilot doctor` prints the path) and edit there. See
 [docs/models.md](docs/models.md) for the format and how to add models.
 
+### Install layout
+
+Everything installs into your user account — no admin / `sudo` required:
+
+| Item        | macOS / Linux                     | Windows                                  |
+| ----------- | --------------------------------- | ---------------------------------------- |
+| App code    | `~/.cc-copilot/app`               | `%USERPROFILE%\.cc-copilot\app`          |
+| CLI command | symlink `~/.local/bin/cc-copilot` | shim `%USERPROFILE%\bin\cc-copilot.cmd`  |
+| On `PATH`   | `~/.local/bin`                    | `%USERPROFILE%\bin` (added to user PATH) |
+| Logs        | `~/.local/share/cc-copilot/logs`  | `%LOCALAPPDATA%\cc-copilot\logs`         |
+
+Set `CC_COPILOT_HOME` before installing to put the app somewhere else. After a
+fresh install on Windows, open a new terminal so the `PATH` change is picked up.
+Full details — service backends, data locations, updating, removing — are in
+[docs/platforms.md](docs/platforms.md).
+
 ---
 
 ## Caveats

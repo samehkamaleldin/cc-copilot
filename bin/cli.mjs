@@ -16,7 +16,7 @@ import { loadConfig } from "../src/config.mjs";
 import { runDaemon } from "../src/daemon.mjs";
 import { installClaudeConfig, uninstallClaudeConfig } from "../src/claude-config.mjs";
 import { getService } from "../src/service.mjs";
-import { logDir, npxCommand, claudeSettingsPath } from "../src/paths.mjs";
+import { logDir, dataDir, npxCommand, claudeSettingsPath, REPO_ROOT } from "../src/paths.mjs";
 
 const cmd = process.argv[2];
 const args = process.argv.slice(3);
@@ -107,8 +107,11 @@ async function doDoctor() {
   out(`node            : ${process.version}`);
   const npx = spawnSync(npxCommand(), ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
   out(`npx             : ${(npx.stdout || "missing").trim()}`);
-  const claude = spawnSync(process.platform === "win32" ? "claude.cmd" : "claude", ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
+  // Resolve `claude` via the shell so Windows honours PATHEXT (.exe / .cmd / .bat).
+  const claude = spawnSync("claude", ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
   out(`claude code     : ${(claude.stdout || "not found on PATH").trim()}`);
+  out(`install dir     : ${REPO_ROOT}`);
+  out(`data dir        : ${dataDir()}`);
   out(`claude settings : ${claudeSettingsPath()}`);
   out(`service status  : ${(() => { try { return getService().status(); } catch (e) { return e.message; } })()}`);
   out(`copilot-api :${cfg.apiPort} : ${await httpCode(cfg.apiPort) || "down"}`);
