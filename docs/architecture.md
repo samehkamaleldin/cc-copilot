@@ -29,7 +29,7 @@ request:
 | Incoming model            | Route                              | Why |
 | ------------------------- | ---------------------------------- | --- |
 | `claude-*`                | Copilot `POST /v1/messages`        | Copilot serves Claude natively in Anthropic format — zero translation, preserves thinking/effort/1M context. |
-| `gpt-5.5` (responses set) | Copilot `POST /v1/responses`       | GPT‑5.5 is only available on the OpenAI Responses API. The shim translates Anthropic ⇄ Responses, including SSE streaming. |
+| `gpt-5.5` (responses set) | Copilot `POST /v1/responses`       | GPT‑5.5 is only available on the OpenAI Responses API. The shim translates Anthropic ⇄ Responses, including tool calls (function calling) and SSE streaming. |
 | anything else             | `copilot-api /chat/completions`    | Fallback for other OpenAI-format models. |
 
 It also serves `GET /v1/models` (curated discovery list) and `GET /healthz`.
@@ -152,10 +152,13 @@ What happens to a single `POST /v1/messages` from Claude Code:
 4b. RESPONSES path (gpt-5.5):
       anthropicToResponses(body)           # messages→input, system→instructions,
                                            # max_tokens→max_output_tokens,
-                                           # output_config.effort→reasoning.effort (max→xhigh)
+                                           # output_config.effort→reasoning.effort (max→xhigh),
+                                           # tools→function tools, tool_choice→Responses,
+                                           # tool_use/tool_result history→function_call/_output
       GET /token ; POST /v1/responses
-      stream  → translate Responses SSE → Anthropic SSE  (streamResponsesToAnthropic)
-      non-stream → responsesToAnthropic()  # output[type=message].content[output_text]
+      stream  → translate Responses SSE → Anthropic SSE  (streamResponsesToAnthropic;
+                function_call_arguments.delta → tool_use input_json_delta)
+      non-stream → responsesToAnthropic()  # message→text, function_call→tool_use
 ```
 
 `GET /v1/models` (discovery) and `GET /healthz` are handled directly by the shim.

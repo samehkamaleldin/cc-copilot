@@ -54,6 +54,45 @@ function mapEffort(effort) {
   return RESPONSES_EFFORTS.has(effort) ? effort : null;
 }
 
+// Map an Anthropic tool_choice to the Responses API equivalent.
+//   {type:"auto"} -> "auto"   {type:"any"}  -> "required"
+//   {type:"none"} -> "none"   {type:"tool",name} -> {type:"function",name}
+function mapToolChoice(tc) {
+  if (!tc) return null;
+  if (typeof tc === "string") return tc;
+  switch (tc.type) {
+    case "auto": return "auto";
+    case "any": return "required";
+    case "none": return "none";
+    case "tool": return tc.name ? { type: "function", name: tc.name } : "required";
+    default: return null;
+  }
+}
+
+// Map Anthropic tools[] -> Responses API function tools. Only custom (function)
+// tools are supported: each has a name and a JSON-schema input_schema that
+// becomes the function `parameters`.
+function mapTools(tools) {
+  if (!Array.isArray(tools)) return null;
+  const fns = tools
+    .filter((t) => t && typeof t.name === "string")
+    .map((t) => ({
+      type: "function",
+      name: t.name,
+      description: t.description ?? "",
+      parameters: t.input_schema ?? { type: "object", properties: {} },
+    }));
+  return fns.length ? fns : null;
+}
+
+// Derive an Anthropic stop_reason from a Responses API result.
+function responsesStopReason(r, hasToolUse) {
+  if (hasToolUse) return "tool_use";
+  if (r?.status === "incomplete")
+    return r.incomplete_details?.reason === "max_output_tokens" ? "max_tokens" : "end_turn";
+  return "end_turn";
+}
+
 /**
  * Build the shim HTTP server.
  * @param {object} cfg  output of loadConfig()
@@ -139,10 +178,48 @@ export function createShimServer(cfg, log = () => {}) {
   }
 
   // ---- Route 2: Responses-API models -> Copilot /v1/responses ----
+  // Text turns become message items; tool_use / tool_result blocks become
+  // function_call / function_call_output items so multi-turn tool loops survive.
   function anthropicToResponses(body, model) {
-    const input = (body.messages ?? [])
-      .filter((m) => m?.role !== "system")
-      .map((m) => ({ role: m.role, content: extractText(m.content) }));
+    const input = [];
+    for (const m of body.messages ?? []) {
+      if (!m || m.role === "system") continue; // system handled as instructions
+      const role = m.role;
+      const content = m.content;
+
+      if (typeof content === "string") {
+        if (content) input.push({ role, content });
+        continue;
+      }
+      if (!Array.isArray(content)) continue;
+
+      // Preserve intra-message ordering: flush buffered text before each
+      // function_call / function_call_output item.
+      let pending = "";
+      const flush = () => { if (pending) { input.push({ role, content: pending }); pending = ""; } };
+      const addText = (t) => { if (t) pending += (pending ? "\n" : "") + t; };
+
+      for (const block of content) {
+        if (typeof block === "string") { addText(block); continue; }
+        if (!block || typeof block !== "object") continue;
+        switch (block.type) {
+          case "text":
+            addText(block.text ?? "");
+            break;
+          case "tool_use":
+            flush();
+            input.push({ type: "function_call", call_id: block.id, name: block.name, arguments: JSON.stringify(block.input ?? {}) });
+            break;
+          case "tool_result":
+            flush();
+            input.push({ type: "function_call_output", call_id: block.tool_use_id, output: extractText(block.content) });
+            break;
+          default:
+            addText(typeof block.text === "string" ? block.text : "");
+        }
+      }
+      flush();
+    }
 
     const systemParts = [];
     if (body.system) systemParts.push(typeof body.system === "string" ? body.system : extractText(body.system));
@@ -155,27 +232,93 @@ export function createShimServer(cfg, log = () => {}) {
     if (body.temperature != null) out.temperature = body.temperature;
     const effort = mapEffort(body.output_config?.effort);
     if (effort) out.reasoning = { effort };
+
+    // Tools: translate function tools + tool_choice (only when tools present).
+    const tools = mapTools(body.tools);
+    if (tools) {
+      out.tools = tools;
+      const tc = mapToolChoice(body.tool_choice);
+      if (tc != null) out.tool_choice = tc;
+    }
     return out;
   }
 
+  // message items -> text blocks; function_call items -> tool_use blocks.
   function responsesToAnthropic(r, model) {
-    const msgItem = (r.output ?? []).find((o) => o.type === "message");
-    const text = msgItem?.content?.find((c) => c.type === "output_text")?.text ?? "";
+    const content = [];
+    let hasToolUse = false;
+    for (const item of r.output ?? []) {
+      if (item?.type === "message") {
+        for (const c of item.content ?? [])
+          if (c?.type === "output_text") content.push({ type: "text", text: c.text ?? "" });
+      } else if (item?.type === "function_call") {
+        hasToolUse = true;
+        let input = {};
+        try { input = item.arguments ? JSON.parse(item.arguments) : {}; } catch { input = {}; }
+        content.push({ type: "tool_use", id: item.call_id || item.id, name: item.name, input });
+      }
+    }
+    if (!content.length) content.push({ type: "text", text: "" });
     return {
       id: "msg_" + (r.id ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24),
       type: "message", role: "assistant",
-      content: [{ type: "text", text }],
+      content,
       model,
-      stop_reason: r.status === "completed" ? "end_turn" : "stop_sequence",
+      stop_reason: responsesStopReason(r, hasToolUse),
       stop_sequence: null,
       usage: { input_tokens: r.usage?.input_tokens ?? 0, output_tokens: r.usage?.output_tokens ?? 0 },
     };
   }
 
+  // Each Responses output item becomes an Anthropic content block: message ->
+  // text (text_delta), function_call -> tool_use (input_json_delta). Blocks open
+  // on output_item.added and close on output_item.done; we assign our own
+  // contiguous block index (reasoning items are skipped, so Responses
+  // output_index is not directly reusable).
   function streamResponsesToAnthropic(upRes, res, model) {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
     const sse = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    let buf = "", eventType = null, blockOpen = false;
+
+    let buf = "", eventType = null;
+    let started = false, sawToolUse = false, outTokens = 0;
+    const blocks = new Map(); // Responses output_index -> { index, closed }
+    let nextIndex = 0;
+
+    const start = (r) => {
+      if (started) return;
+      const id = "msg_" + ((r && r.id) || "stream").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24);
+      sse("message_start", { type: "message_start", message: {
+        id, type: "message", role: "assistant", content: [], model,
+        stop_reason: null, stop_sequence: null, usage: { input_tokens: r?.usage?.input_tokens ?? 0, output_tokens: 0 } } });
+      sse("ping", { type: "ping" });
+      started = true;
+    };
+
+    const open = (oi, block) => {
+      if (blocks.has(oi)) return blocks.get(oi);
+      const entry = { index: nextIndex++, closed: false };
+      blocks.set(oi, entry);
+      sse("content_block_start", { type: "content_block_start", index: entry.index, content_block: block });
+      return entry;
+    };
+
+    const close = (oi) => {
+      const b = blocks.get(oi);
+      if (!b || b.closed) return;
+      b.closed = true;
+      sse("content_block_stop", { type: "content_block_stop", index: b.index });
+    };
+
+    const finish = (r) => {
+      outTokens = r?.usage?.output_tokens ?? outTokens;
+      for (const oi of blocks.keys()) close(oi);
+      sse("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: responsesStopReason(r ?? {}, sawToolUse), stop_sequence: null },
+        usage: { output_tokens: outTokens },
+      });
+      sse("message_stop", { type: "message_stop" });
+    };
 
     upRes.on("data", (chunk) => {
       buf += chunk.toString();
@@ -186,35 +329,48 @@ export function createShimServer(cfg, log = () => {}) {
         if (!line.startsWith("data: ") || !eventType) continue;
         let p; try { p = JSON.parse(line.slice(6)); } catch { continue; }
         switch (eventType) {
-          case "response.created": {
-            const r = p.response ?? {};
-            const id = "msg_" + (r.id ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24);
-            sse("message_start", { type: "message_start", message: {
-              id, type: "message", role: "assistant", content: [], model,
-              stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
-            sse("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
-            sse("ping", { type: "ping" });
-            blockOpen = true;
+          case "response.created":
+          case "response.in_progress":
+            start(p.response);
+            break;
+          case "response.output_item.added": {
+            start();
+            const item = p.item ?? {};
+            const oi = p.output_index ?? 0;
+            if (item.type === "function_call") {
+              sawToolUse = true;
+              open(oi, { type: "tool_use", id: item.call_id || item.id || ("toolu_" + oi), name: item.name || "", input: {} });
+            } else if (item.type === "message") {
+              open(oi, { type: "text", text: "" });
+            }
             break;
           }
-          case "response.output_text.delta":
-            sse("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: p.delta ?? "" } });
-            break;
-          case "response.output_text.done":
-            if (blockOpen) { sse("content_block_stop", { type: "content_block_stop", index: 0 }); blockOpen = false; }
-            break;
-          case "response.completed": {
-            const r = p.response ?? {};
-            if (blockOpen) { sse("content_block_stop", { type: "content_block_stop", index: 0 }); blockOpen = false; }
-            sse("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: r.usage?.output_tokens ?? 0 } });
-            sse("message_stop", { type: "message_stop" });
+          case "response.output_text.delta": {
+            start();
+            const b = open(p.output_index ?? 0, { type: "text", text: "" });
+            sse("content_block_delta", { type: "content_block_delta", index: b.index, delta: { type: "text_delta", text: p.delta ?? "" } });
             break;
           }
+          case "response.function_call_arguments.delta": {
+            start();
+            sawToolUse = true;
+            const b = open(p.output_index ?? 0, { type: "tool_use", id: "toolu_" + (p.output_index ?? 0), name: "", input: {} });
+            sse("content_block_delta", { type: "content_block_delta", index: b.index, delta: { type: "input_json_delta", partial_json: p.delta ?? "" } });
+            break;
+          }
+          case "response.output_item.done":
+            close(p.output_index ?? 0);
+            break;
+          case "response.completed":
+          case "response.incomplete":
+          case "response.failed":
+            finish(p.response);
+            break;
         }
       }
     });
     upRes.on("end", () => {
-      if (blockOpen) res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
+      if (started) for (const oi of blocks.keys()) close(oi);
       res.end();
     });
     upRes.on("error", () => res.end());
