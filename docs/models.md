@@ -26,14 +26,31 @@ User config is merged over the bundled defaults. After editing, run
     "opus":   "claude-opus-4-8[1m]",
     "sonnet": "claude-sonnet-5[1m]",
     "haiku":  "claude-haiku-4-5",
-    "fable":  "gpt-5.5"
+    "fable":  "gpt-5.6-sol[1m]",
+    "gpt-56-sol":   "gpt-5.6-sol",
+    "gpt-56-luna":  "gpt-5.6-luna",
+    "gpt-56-terra": "gpt-5.6-terra"
   },
 
   // Written to Claude Code's `model` setting (alias or full id).
   "defaultModel": "opus",
 
   // Models that ONLY work on Copilot's /v1/responses endpoint.
-  "responsesApiModels": ["gpt-5.5"],
+  "responsesApiModels": ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"],
+
+  // Optional display name/description for a repurposed tier row in the /model
+  // picker (emits ANTHROPIC_DEFAULT_<TIER>_MODEL_NAME/_DESCRIPTION).
+  "tierLabels": {
+    "fable": { "name": "GPT-5.6 Sol (1M)", "description": "GPT-5.6 Sol via GitHub Copilot — 1M context" }
+  },
+
+  // One extra /model picker row (Foundry supports a single custom option).
+  // Emits ANTHROPIC_CUSTOM_MODEL_OPTION[_NAME|_DESCRIPTION].
+  "customModelOption": {
+    "id": "gpt-5.6-luna[1m]",
+    "name": "GPT-5.6 Luna (1M)",
+    "description": "GPT-5.6 Luna via GitHub Copilot — 1M context"
+  },
 
   // Curated /v1/models discovery list (only used in gateway mode).
   // `id` = copilot-api's upstream (dotted) id; `canonical` = the dashed id
@@ -43,7 +60,10 @@ User config is merged over the bundled defaults. After editing, run
     { "id": "claude-opus-4.8",  "canonical": "claude-opus-4-8",  "name": "Claude Opus 4.8" },
     { "id": "claude-sonnet-5",  "canonical": "claude-sonnet-5",  "name": "Claude Sonnet 5" },
     { "id": "claude-haiku-4.5", "canonical": "claude-haiku-4-5", "name": "Claude Haiku 4.5" },
-    { "id": "gpt-5.5",          "canonical": "gpt-5.5",          "name": "GPT-5.5" }
+    { "id": "gpt-5.5",          "canonical": "gpt-5.5",          "name": "GPT-5.5" },
+    { "id": "gpt-5.6-sol",      "canonical": "gpt-56-sol",       "name": "GPT-5.6 Sol" },
+    { "id": "gpt-5.6-luna",     "canonical": "gpt-56-luna",      "name": "GPT-5.6 Luna" },
+    { "id": "gpt-5.6-terra",    "canonical": "gpt-56-terra",     "name": "GPT-5.6 Terra" }
   ]
 }
 ```
@@ -60,7 +80,12 @@ User config is merged over the bundled defaults. After editing, run
   "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8[1m]",
   "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5[1m]",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5",
-  "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-5.5"
+  "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-5.6-sol[1m]",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "GPT-5.6 Sol (1M)",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "GPT-5.6 Sol via GitHub Copilot — 1M context",
+  "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-5.6-luna[1m]",
+  "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-5.6 Luna (1M)",
+  "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "GPT-5.6 Luna via GitHub Copilot — 1M context"
 }
 ```
 
@@ -68,9 +93,26 @@ So in Claude Code:
 - `/model opus` → `claude-opus-4-8[1m]`
 - `/model sonnet` → `claude-sonnet-5[1m]`
 - `/model haiku` → `claude-haiku-4-5`
-- `/model fable` → `gpt-5.5`
+- `/model fable` → `gpt-5.6-sol[1m]` (shows as **GPT-5.6 Sol (1M)**)
+- **GPT-5.6 Luna (1M)** custom row → `gpt-5.6-luna[1m]`
 
-You can also select a model by full id, e.g. `/model claude-opus-4-8`.
+You can also select a model by full id, e.g. `/model claude-opus-4-8`, or type
+any GPT-5.6 alias directly: `/model gpt-56-terra` (200K) or
+`/model gpt-56-terra[1m]` (1M).
+
+### Extra picker rows & the 1M window
+
+In Foundry provider mode the `/model` picker has a fixed set of slots — the four
+tiers (opus/sonnet/haiku/fable) plus **one** `customModelOption`. To surface a
+non-tier model as its own row, either repurpose the `fable` slot (with an
+optional `tierLabels` label) or set `customModelOption`. Additional models stay
+reachable by typing their id in `/model`.
+
+The `[1m]` suffix budgets the 1M context window; the shim strips it before the
+request reaches Copilot. The suffix is read **per env variable**, so the same
+model can appear at 200K in one slot and 1M in another. For the full
+200K-and-1M matrix across many models (more rows than Foundry allows), switch to
+gateway mode and let `discovery` drive the picker.
 
 ## Discovering what Copilot offers
 

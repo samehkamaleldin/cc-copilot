@@ -30,6 +30,8 @@ export function loadConfig() {
     defaultModel: user.defaultModel || bundled.defaultModel || "opus",
     responsesApiModels: user.responsesApiModels || bundled.responsesApiModels || [],
     discovery: user.discovery || bundled.discovery || [],
+    tierLabels: { ...(bundled.tierLabels || {}), ...(user.tierLabels || {}) },
+    customModelOption: user.customModelOption || bundled.customModelOption || null,
   };
 
   // Env overrides for ports.
@@ -49,6 +51,8 @@ export function loadConfig() {
     defaultModel: merged.defaultModel,
     responsesApiModels: new Set(merged.responsesApiModels),
     discovery: merged.discovery,
+    tierLabels: merged.tierLabels,
+    customModelOption: merged.customModelOption,
     canonicalById,
     discoveryAllow: new Set(merged.discovery.map((m) => m.id)),
   };

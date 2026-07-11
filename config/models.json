@@ -9,19 +9,35 @@
     "opus": "claude-opus-4-8[1m]",
     "sonnet": "claude-sonnet-5[1m]",
     "haiku": "claude-haiku-4-5",
-    "fable": "gpt-5.5"
+    "fable": "gpt-5.6-sol[1m]",
+    "gpt-56-sol": "gpt-5.6-sol",
+    "gpt-56-luna": "gpt-5.6-luna",
+    "gpt-56-terra": "gpt-5.6-terra"
+  },
+  "//tierLabels": "Optional display name/description for a tier row in Claude Code's /model picker (ANTHROPIC_DEFAULT_<TIER>_MODEL_NAME/_DESCRIPTION). Used when a tier is repurposed to a non-obvious model (e.g. Fable -> a GPT model).",
+  "tierLabels": {
+    "fable": { "name": "GPT-5.6 Sol (1M)", "description": "GPT-5.6 Sol via GitHub Copilot — 1M context" }
+  },
+  "//customModelOption": "One extra row added to Claude Code's /model picker via ANTHROPIC_CUSTOM_MODEL_OPTION. Foundry mode supports a single custom option; additional models remain reachable by typing their id in /model. The [1m] suffix budgets the 1M window (stripped by the shim before Copilot).",
+  "customModelOption": {
+    "id": "gpt-5.6-luna[1m]",
+    "name": "GPT-5.6 Luna (1M)",
+    "description": "GPT-5.6 Luna via GitHub Copilot — 1M context"
   },
   "//defaultModel": "Session default written to the Claude `model` setting.",
   "defaultModel": "opus",
 
   "//responsesApiModels": "Models that ONLY work on Copilot's /v1/responses endpoint (OpenAI Responses API). The shim translates Anthropic Messages <-> Responses for these.",
-  "responsesApiModels": ["gpt-5.5"],
+  "responsesApiModels": ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"],
 
   "//discovery": "Curated model list exposed on GET /v1/models. `id` matches copilot-api's upstream (dotted) id; `canonical` is the dashed id Claude Code recognises. Non-claude ids are re-exposed under a synthetic 'anthropic-copilot-' prefix so Claude Code's gateway discovery keeps them. Discovery is OFF in Foundry mode (the default), so this is used only if you switch to gateway mode.",
   "discovery": [
     { "id": "claude-opus-4.8",  "canonical": "claude-opus-4-8",  "name": "Claude Opus 4.8" },
     { "id": "claude-sonnet-5",  "canonical": "claude-sonnet-5",  "name": "Claude Sonnet 5" },
     { "id": "claude-haiku-4.5", "canonical": "claude-haiku-4-5", "name": "Claude Haiku 4.5" },
-    { "id": "gpt-5.5",          "canonical": "gpt-5.5",          "name": "GPT-5.5" }
+    { "id": "gpt-5.5",          "canonical": "gpt-5.5",          "name": "GPT-5.5" },
+    { "id": "gpt-5.6-sol",      "canonical": "gpt-56-sol",       "name": "GPT-5.6 Sol" },
+    { "id": "gpt-5.6-luna",     "canonical": "gpt-56-luna",      "name": "GPT-5.6 Luna" },
+    { "id": "gpt-5.6-terra",    "canonical": "gpt-56-terra",     "name": "GPT-5.6 Terra" }
   ]
 }

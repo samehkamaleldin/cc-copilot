@@ -18,14 +18,23 @@ const TIER_ENV = {
   fable: "ANTHROPIC_DEFAULT_FABLE_MODEL",
 };
 
+// One extra "/model" picker row (Foundry supports a single custom option).
+const CUSTOM_ENV = {
+  id: "ANTHROPIC_CUSTOM_MODEL_OPTION",
+  name: "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+  description: "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+};
+
 /** The exact set of env keys cc-copilot manages (so uninstall is clean). */
 export function managedEnvKeys() {
+  const tierKeys = Object.values(TIER_ENV).flatMap((k) => [k, k + "_NAME", k + "_DESCRIPTION"]);
   return [
     MARK,
     "CLAUDE_CODE_USE_FOUNDRY",
     "ANTHROPIC_FOUNDRY_BASE_URL",
     "ANTHROPIC_FOUNDRY_API_KEY",
-    ...Object.values(TIER_ENV),
+    ...tierKeys,
+    ...Object.values(CUSTOM_ENV),
   ];
 }
 
@@ -48,7 +57,17 @@ export function buildEnvBlock(cfg = loadConfig()) {
     ANTHROPIC_FOUNDRY_API_KEY: "cc-copilot",
   };
   for (const [tier, key] of Object.entries(TIER_ENV)) {
-    if (cfg.aliases[tier]) env[key] = cfg.aliases[tier];
+    if (!cfg.aliases[tier]) continue;
+    env[key] = cfg.aliases[tier];
+    const label = cfg.tierLabels?.[tier];
+    if (label?.name) env[key + "_NAME"] = label.name;
+    if (label?.description) env[key + "_DESCRIPTION"] = label.description;
+  }
+  const custom = cfg.customModelOption;
+  if (custom?.id) {
+    env[CUSTOM_ENV.id] = custom.id;
+    if (custom.name) env[CUSTOM_ENV.name] = custom.name;
+    if (custom.description) env[CUSTOM_ENV.description] = custom.description;
   }
   return env;
 }
