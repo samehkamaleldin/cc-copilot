@@ -32,6 +32,7 @@ export function loadConfig() {
     discovery: user.discovery || bundled.discovery || [],
     tierLabels: { ...(bundled.tierLabels || {}), ...(user.tierLabels || {}) },
     customModelOption: user.customModelOption || bundled.customModelOption || null,
+    reasoningEffortOverrides: { ...(bundled.reasoningEffortOverrides || {}), ...(user.reasoningEffortOverrides || {}) },
   };
 
   // Env overrides for ports.
@@ -53,6 +54,7 @@ export function loadConfig() {
     discovery: merged.discovery,
     tierLabels: merged.tierLabels,
     customModelOption: merged.customModelOption,
+    reasoningEffortOverrides: merged.reasoningEffortOverrides,
     canonicalById,
     discoveryAllow: new Set(merged.discovery.map((m) => m.id)),
   };

@@ -9,14 +9,20 @@
     "opus": "claude-opus-4-8[1m]",
     "sonnet": "claude-sonnet-5[1m]",
     "haiku": "claude-haiku-4-5",
-    "fable": "gpt-5.6-sol[1m]",
+    "fable": "gpt-56-sol-ultra[1m]",
     "gpt-56-sol": "gpt-5.6-sol",
+    "gpt-56-sol-ultra": "gpt-5.6-sol",
     "gpt-56-luna": "gpt-5.6-luna",
     "gpt-56-terra": "gpt-5.6-terra"
   },
+  "//reasoningEffortOverrides": "Virtual model aliases that always use a specific Responses API reasoning effort. Sol Ultra is the regular Sol deployment with max reasoning.",
+  "reasoningEffortOverrides": {
+    "fable": "max",
+    "gpt-56-sol-ultra": "max"
+  },
   "//tierLabels": "Optional display name/description for a tier row in Claude Code's /model picker (ANTHROPIC_DEFAULT_<TIER>_MODEL_NAME/_DESCRIPTION). Used when a tier is repurposed to a non-obvious model (e.g. Fable -> a GPT model).",
   "tierLabels": {
-    "fable": { "name": "GPT-5.6 Sol (1M)", "description": "GPT-5.6 Sol via GitHub Copilot — 1M context" }
+    "fable": { "name": "GPT-5.6 Sol Ultra (1M)", "description": "GPT-5.6 Sol via GitHub Copilot — max reasoning, 1M context" }
   },
   "//customModelOption": "One extra row added to Claude Code's /model picker via ANTHROPIC_CUSTOM_MODEL_OPTION. Foundry mode supports a single custom option; additional models remain reachable by typing their id in /model. The [1m] suffix budgets the 1M window (stripped by the shim before Copilot).",
   "customModelOption": {

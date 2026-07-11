@@ -38,8 +38,8 @@ const ALLOWED_MESSAGES_FIELDS = new Set([
   "stream", "temperature", "thinking", "tool_choice", "tools", "top_k", "top_p",
 ]);
 
-// Reasoning efforts the Responses API accepts (max -> xhigh).
-const RESPONSES_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh"]);
+// Reasoning efforts accepted by current Responses API models.
+const RESPONSES_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
 
 function extractText(content) {
   if (typeof content === "string") return content;
@@ -48,9 +48,9 @@ function extractText(content) {
   return "";
 }
 
-function mapEffort(effort) {
+function mapEffort(effort, model) {
   if (!effort) return null;
-  if (effort === "max") return "xhigh";
+  if (effort === "max" && !model.startsWith("gpt-5.6-")) return "xhigh";
   return RESPONSES_EFFORTS.has(effort) ? effort : null;
 }
 
@@ -100,7 +100,7 @@ function responsesStopReason(r, hasToolUse) {
  * @returns {http.Server}
  */
 export function createShimServer(cfg, log = () => {}) {
-  const { shimPort, apiPort, aliases, responsesApiModels, canonicalById, discoveryAllow } = cfg;
+  const { shimPort, apiPort, aliases, responsesApiModels, reasoningEffortOverrides, canonicalById, discoveryAllow } = cfg;
 
   // Resolve a model name: strip discovery prefix + [1m] suffix, apply alias,
   // then strip [1m] again (alias values like "claude-opus-4-8[1m]" carry it).
@@ -230,7 +230,7 @@ export function createShimServer(cfg, log = () => {}) {
     if (systemParts.length) out.instructions = systemParts.join("\n\n");
     if (body.max_tokens != null) out.max_output_tokens = body.max_tokens;
     if (body.temperature != null) out.temperature = body.temperature;
-    const effort = mapEffort(body.output_config?.effort);
+    const effort = mapEffort(body.output_config?.effort, model);
     if (effort) out.reasoning = { effort };
 
     // Tools: translate function tools + tool_choice (only when tools present).
@@ -480,7 +480,10 @@ export function createShimServer(cfg, log = () => {}) {
       if (req.method === "POST" && req.url.startsWith("/v1/messages")) {
         let body; try { body = JSON.parse(outBuf.toString("utf8")); } catch { body = null; }
         if (body) {
+          const requestedModel = (body.model ?? "").replace(/\[1m\]$/i, "");
+          const effortOverride = reasoningEffortOverrides[requestedModel];
           body.model = resolveModel(body.model ?? "");
+          if (effortOverride) body.output_config = { ...(body.output_config || {}), effort: effortOverride };
           const model = body.model;
           if (responsesApiModels.has(model)) { log(`${model} -> /v1/responses`); return handleResponsesApiModel(body, res, model); }
           if (/^claude-/i.test(model)) { log(`${model} -> /v1/messages (native)`); return handleClaudeNative(body, res); }
