@@ -280,7 +280,7 @@ export function createShimServer(cfg, log = () => {}) {
     const sse = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
     let buf = "", eventType = null;
-    let started = false, sawToolUse = false, outTokens = 0;
+    let started = false, sawToolUse = false, outTokens = 0, inTokens = 0;
     const blocks = new Map(); // Responses output_index -> { index, closed }
     let nextIndex = 0;
 
@@ -311,11 +311,15 @@ export function createShimServer(cfg, log = () => {}) {
 
     const finish = (r) => {
       outTokens = r?.usage?.output_tokens ?? outTokens;
+      // Responses reports usage only on the terminal event (message_start had
+      // input_tokens:0). Carry input_tokens through the final message_delta so
+      // Claude Code's context meter can track the conversation size.
+      inTokens = r?.usage?.input_tokens ?? inTokens;
       for (const oi of blocks.keys()) close(oi);
       sse("message_delta", {
         type: "message_delta",
         delta: { stop_reason: responsesStopReason(r ?? {}, sawToolUse), stop_sequence: null },
-        usage: { output_tokens: outTokens },
+        usage: { input_tokens: inTokens, output_tokens: outTokens },
       });
       sse("message_stop", { type: "message_stop" });
     };
