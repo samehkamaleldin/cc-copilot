@@ -93,14 +93,20 @@ function responsesStopReason(r, hasToolUse) {
   return "end_turn";
 }
 
-// Resolve a model name: strip discovery prefix + [1m] suffix, apply alias,
-// then strip [1m] again (alias values like "claude-opus-4-8[1m]" carry it).
+// Resolve a model name: strip discovery prefix + [1m] suffix, then follow the
+// alias chain, stripping [1m] after each hop (alias values like
+// "claude-opus-4-8[1m]" carry it). Aliases may chain — e.g.
+// fable -> gpt-56-sol-ultra[1m] -> gpt-5.6-sol — so resolution repeats until it
+// reaches a real model id, with a visited set guarding against a config cycle.
 export function resolveModel(name, aliases = {}) {
   let n = name ?? "";
   if (n.startsWith(DISCOVERY_PREFIX)) n = n.slice(DISCOVERY_PREFIX.length);
   n = n.replace(/\[1m\]$/i, "");
-  n = aliases[n] ?? n;
-  n = n.replace(/\[1m\]$/i, "");
+  const seen = new Set();
+  while (aliases[n] != null && !seen.has(n)) {
+    seen.add(n);
+    n = String(aliases[n]).replace(/\[1m\]$/i, "");
+  }
   return n;
 }
 

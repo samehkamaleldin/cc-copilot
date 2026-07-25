@@ -62,6 +62,18 @@ test("resolveModel passes through unknown ids and tolerates empty input", () => 
   assert.equal(resolveModel(null), "");
 });
 
+test("resolveModel follows a chained alias to the real model id", () => {
+  // The shipped config chains: fable -> gpt-56-sol-ultra[1m] -> gpt-5.6-sol.
+  const aliases = { fable: "gpt-56-sol-ultra[1m]", "gpt-56-sol-ultra": "gpt-5.6-sol" };
+  assert.equal(resolveModel("fable", aliases), "gpt-5.6-sol");
+  assert.equal(resolveModel("gpt-56-sol-ultra[1m]", aliases), "gpt-5.6-sol");
+});
+
+test("resolveModel does not hang on a cyclic alias config", () => {
+  assert.equal(resolveModel("a", { a: "b", b: "a" }), "a");
+  assert.equal(resolveModel("x", { x: "x" }), "x");
+});
+
 /* --------------------------- hoistSystemMessages --------------------------- */
 
 test("hoistSystemMessages moves system turns into the top-level field", () => {
