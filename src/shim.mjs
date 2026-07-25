@@ -93,6 +93,268 @@ function responsesStopReason(r, hasToolUse) {
   return "end_turn";
 }
 
+// Resolve a model name: strip discovery prefix + [1m] suffix, apply alias,
+// then strip [1m] again (alias values like "claude-opus-4-8[1m]" carry it).
+export function resolveModel(name, aliases = {}) {
+  let n = name ?? "";
+  if (n.startsWith(DISCOVERY_PREFIX)) n = n.slice(DISCOVERY_PREFIX.length);
+  n = n.replace(/\[1m\]$/i, "");
+  n = aliases[n] ?? n;
+  n = n.replace(/\[1m\]$/i, "");
+  return n;
+}
+
+// Trailing role:"system" messages are hoisted into the top-level system field
+// (Copilot requires the messages array to end with a user turn). Mutates `body`.
+export function hoistSystemMessages(body) {
+  if (!Array.isArray(body.messages)) return;
+  const systemTexts = [];
+  body.messages = body.messages.filter((m) => {
+    if (m?.role !== "system") return true;
+    const t = extractText(m.content);
+    if (t) systemTexts.push(t);
+    return false;
+  });
+  if (!systemTexts.length) return;
+  const extra = systemTexts.join("\n\n");
+  if (body.system == null) body.system = extra;
+  else if (typeof body.system === "string") body.system += "\n\n" + extra;
+  else if (Array.isArray(body.system)) body.system.push({ type: "text", text: extra });
+  else body.system = extra;
+}
+
+// ---- Anthropic Messages -> OpenAI Responses ----
+// Text turns become message items; tool_use / tool_result blocks become
+// function_call / function_call_output items so multi-turn tool loops survive.
+export function anthropicToResponses(body, model) {
+  const input = [];
+  for (const m of body.messages ?? []) {
+    if (!m || m.role === "system") continue; // system handled as instructions
+    const role = m.role;
+    const content = m.content;
+
+    if (typeof content === "string") {
+      if (content) input.push({ role, content });
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+
+    // Preserve intra-message ordering: flush buffered text before each
+    // function_call / function_call_output item.
+    let pending = "";
+    const flush = () => { if (pending) { input.push({ role, content: pending }); pending = ""; } };
+    const addText = (t) => { if (t) pending += (pending ? "\n" : "") + t; };
+
+    for (const block of content) {
+      if (typeof block === "string") { addText(block); continue; }
+      if (!block || typeof block !== "object") continue;
+      switch (block.type) {
+        case "text":
+          addText(block.text ?? "");
+          break;
+        case "tool_use":
+          flush();
+          input.push({ type: "function_call", call_id: block.id, name: block.name, arguments: JSON.stringify(block.input ?? {}) });
+          break;
+        case "tool_result":
+          flush();
+          input.push({ type: "function_call_output", call_id: block.tool_use_id, output: extractText(block.content) });
+          break;
+        default:
+          addText(typeof block.text === "string" ? block.text : "");
+      }
+    }
+    flush();
+  }
+
+  const systemParts = [];
+  if (body.system) systemParts.push(typeof body.system === "string" ? body.system : extractText(body.system));
+  for (const m of body.messages ?? [])
+    if (m?.role === "system") { const t = extractText(m.content); if (t) systemParts.push(t); }
+
+  const out = { model, input, stream: body.stream ?? false };
+  if (systemParts.length) out.instructions = systemParts.join("\n\n");
+  if (body.max_tokens != null) out.max_output_tokens = body.max_tokens;
+  if (body.temperature != null) out.temperature = body.temperature;
+  const effort = mapEffort(body.output_config?.effort, model);
+  if (effort) out.reasoning = { effort };
+
+  // Tools: translate function tools + tool_choice (only when tools present).
+  const tools = mapTools(body.tools);
+  if (tools) {
+    out.tools = tools;
+    const tc = mapToolChoice(body.tool_choice);
+    if (tc != null) out.tool_choice = tc;
+  }
+  return out;
+}
+
+// ---- OpenAI Responses -> Anthropic Messages ----
+// message items -> text blocks; function_call items -> tool_use blocks.
+export function responsesToAnthropic(r, model) {
+  const content = [];
+  let hasToolUse = false;
+  for (const item of r.output ?? []) {
+    if (item?.type === "message") {
+      for (const c of item.content ?? [])
+        if (c?.type === "output_text") content.push({ type: "text", text: c.text ?? "" });
+    } else if (item?.type === "function_call") {
+      hasToolUse = true;
+      let input = {};
+      try { input = item.arguments ? JSON.parse(item.arguments) : {}; } catch { input = {}; }
+      content.push({ type: "tool_use", id: item.call_id || item.id, name: item.name, input });
+    }
+  }
+  if (!content.length) content.push({ type: "text", text: "" });
+  return {
+    id: "msg_" + (r.id ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24),
+    type: "message", role: "assistant",
+    content,
+    model,
+    stop_reason: responsesStopReason(r, hasToolUse),
+    stop_sequence: null,
+    usage: { input_tokens: r.usage?.input_tokens ?? 0, output_tokens: r.usage?.output_tokens ?? 0 },
+  };
+}
+
+// Each Responses output item becomes an Anthropic content block: message ->
+// text (text_delta), function_call -> tool_use (input_json_delta). Blocks open
+// on output_item.added and close on output_item.done; we assign our own
+// contiguous block index (reasoning items are skipped, so Responses
+// output_index is not directly reusable).
+export function streamResponsesToAnthropic(upRes, res, model) {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  const sse = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+  let buf = "", eventType = null;
+  let started = false, sawToolUse = false, outTokens = 0, inTokens = 0;
+  const blocks = new Map(); // Responses output_index -> { index, closed }
+  let nextIndex = 0;
+
+  const start = (r) => {
+    if (started) return;
+    const id = "msg_" + ((r && r.id) || "stream").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24);
+    sse("message_start", { type: "message_start", message: {
+      id, type: "message", role: "assistant", content: [], model,
+      stop_reason: null, stop_sequence: null, usage: { input_tokens: r?.usage?.input_tokens ?? 0, output_tokens: 0 } } });
+    sse("ping", { type: "ping" });
+    started = true;
+  };
+
+  const open = (oi, block) => {
+    if (blocks.has(oi)) return blocks.get(oi);
+    const entry = { index: nextIndex++, closed: false };
+    blocks.set(oi, entry);
+    sse("content_block_start", { type: "content_block_start", index: entry.index, content_block: block });
+    return entry;
+  };
+
+  const close = (oi) => {
+    const b = blocks.get(oi);
+    if (!b || b.closed) return;
+    b.closed = true;
+    sse("content_block_stop", { type: "content_block_stop", index: b.index });
+  };
+
+  const finish = (r) => {
+    outTokens = r?.usage?.output_tokens ?? outTokens;
+    // Responses reports usage only on the terminal event (message_start had
+    // input_tokens:0). Carry input_tokens through the final message_delta so
+    // Claude Code's context meter can track the conversation size.
+    inTokens = r?.usage?.input_tokens ?? inTokens;
+    for (const oi of blocks.keys()) close(oi);
+    sse("message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: responsesStopReason(r ?? {}, sawToolUse), stop_sequence: null },
+      usage: { input_tokens: inTokens, output_tokens: outTokens },
+    });
+    sse("message_stop", { type: "message_stop" });
+  };
+
+  upRes.on("data", (chunk) => {
+    buf += chunk.toString();
+    const lines = buf.split("\n");
+    buf = lines.pop();
+    for (const line of lines) {
+      if (line.startsWith("event: ")) { eventType = line.slice(7).trim(); continue; }
+      if (!line.startsWith("data: ") || !eventType) continue;
+      let p; try { p = JSON.parse(line.slice(6)); } catch { continue; }
+      switch (eventType) {
+        case "response.created":
+        case "response.in_progress":
+          start(p.response);
+          break;
+        case "response.output_item.added": {
+          start();
+          const item = p.item ?? {};
+          const oi = p.output_index ?? 0;
+          if (item.type === "function_call") {
+            sawToolUse = true;
+            open(oi, { type: "tool_use", id: item.call_id || item.id || ("toolu_" + oi), name: item.name || "", input: {} });
+          } else if (item.type === "message") {
+            open(oi, { type: "text", text: "" });
+          }
+          break;
+        }
+        case "response.output_text.delta": {
+          start();
+          const b = open(p.output_index ?? 0, { type: "text", text: "" });
+          sse("content_block_delta", { type: "content_block_delta", index: b.index, delta: { type: "text_delta", text: p.delta ?? "" } });
+          break;
+        }
+        case "response.function_call_arguments.delta": {
+          start();
+          sawToolUse = true;
+          const b = open(p.output_index ?? 0, { type: "tool_use", id: "toolu_" + (p.output_index ?? 0), name: "", input: {} });
+          sse("content_block_delta", { type: "content_block_delta", index: b.index, delta: { type: "input_json_delta", partial_json: p.delta ?? "" } });
+          break;
+        }
+        case "response.output_item.done":
+          close(p.output_index ?? 0);
+          break;
+        case "response.completed":
+        case "response.incomplete":
+        case "response.failed":
+          finish(p.response);
+          break;
+      }
+    }
+  });
+  upRes.on("end", () => {
+    if (started) for (const oi of blocks.keys()) close(oi);
+    res.end();
+  });
+  upRes.on("error", () => res.end());
+}
+
+// Relay a non-200 upstream response as an Anthropic-shaped error.
+//
+// This must run BEFORE any streaming translation starts: once SSE headers are
+// written the status is locked to 200, so an upstream 401/429/400 on a
+// streaming request would otherwise reach the client as an empty *successful*
+// response instead of a surfaced error.
+export function relayUpstreamError(upRes, res) {
+  let d = "";
+  upRes.on("data", (c) => (d += c));
+  upRes.on("end", () => {
+    const status = upRes.statusCode || 502;
+    let message = d.trim();
+    try {
+      const parsed = JSON.parse(d);
+      message = parsed?.error?.message ?? parsed?.message ?? JSON.stringify(parsed);
+    } catch { /* not JSON — use the raw body */ }
+    if (!res.headersSent) res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      type: "error",
+      error: { type: status === 429 ? "rate_limit_error" : "api_error", message: message || `upstream returned ${status}` },
+    }));
+  });
+  upRes.on("error", (e) => {
+    if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
+    res.end(JSON.stringify({ type: "error", error: { type: "api_error", message: "upstream error: " + e.message } }));
+  });
+}
+
 /**
  * Build the shim HTTP server.
  * @param {object} cfg  output of loadConfig()
@@ -101,17 +363,6 @@ function responsesStopReason(r, hasToolUse) {
  */
 export function createShimServer(cfg, log = () => {}) {
   const { shimPort, apiPort, aliases, responsesApiModels, reasoningEffortOverrides, canonicalById, discoveryAllow } = cfg;
-
-  // Resolve a model name: strip discovery prefix + [1m] suffix, apply alias,
-  // then strip [1m] again (alias values like "claude-opus-4-8[1m]" carry it).
-  function resolveModel(name) {
-    let n = name ?? "";
-    if (n.startsWith(DISCOVERY_PREFIX)) n = n.slice(DISCOVERY_PREFIX.length);
-    n = n.replace(/\[1m\]$/i, "");
-    n = aliases[n] ?? n;
-    n = n.replace(/\[1m\]$/i, "");
-    return n;
-  }
 
   function getCopilotToken() {
     return new Promise((resolve, reject) => {
@@ -128,23 +379,6 @@ export function createShimServer(cfg, log = () => {}) {
       req.on("error", reject);
       req.end();
     });
-  }
-
-  function hoistSystemMessages(body) {
-    if (!Array.isArray(body.messages)) return;
-    const systemTexts = [];
-    body.messages = body.messages.filter((m) => {
-      if (m?.role !== "system") return true;
-      const t = extractText(m.content);
-      if (t) systemTexts.push(t);
-      return false;
-    });
-    if (!systemTexts.length) return;
-    const extra = systemTexts.join("\n\n");
-    if (body.system == null) body.system = extra;
-    else if (typeof body.system === "string") body.system += "\n\n" + extra;
-    else if (Array.isArray(body.system)) body.system.push({ type: "text", text: extra });
-    else body.system = extra;
   }
 
   // ---- Route 1: Claude models -> Copilot /v1/messages (native) ----
@@ -178,208 +412,6 @@ export function createShimServer(cfg, log = () => {}) {
   }
 
   // ---- Route 2: Responses-API models -> Copilot /v1/responses ----
-  // Text turns become message items; tool_use / tool_result blocks become
-  // function_call / function_call_output items so multi-turn tool loops survive.
-  function anthropicToResponses(body, model) {
-    const input = [];
-    for (const m of body.messages ?? []) {
-      if (!m || m.role === "system") continue; // system handled as instructions
-      const role = m.role;
-      const content = m.content;
-
-      if (typeof content === "string") {
-        if (content) input.push({ role, content });
-        continue;
-      }
-      if (!Array.isArray(content)) continue;
-
-      // Preserve intra-message ordering: flush buffered text before each
-      // function_call / function_call_output item.
-      let pending = "";
-      const flush = () => { if (pending) { input.push({ role, content: pending }); pending = ""; } };
-      const addText = (t) => { if (t) pending += (pending ? "\n" : "") + t; };
-
-      for (const block of content) {
-        if (typeof block === "string") { addText(block); continue; }
-        if (!block || typeof block !== "object") continue;
-        switch (block.type) {
-          case "text":
-            addText(block.text ?? "");
-            break;
-          case "tool_use":
-            flush();
-            input.push({ type: "function_call", call_id: block.id, name: block.name, arguments: JSON.stringify(block.input ?? {}) });
-            break;
-          case "tool_result":
-            flush();
-            input.push({ type: "function_call_output", call_id: block.tool_use_id, output: extractText(block.content) });
-            break;
-          default:
-            addText(typeof block.text === "string" ? block.text : "");
-        }
-      }
-      flush();
-    }
-
-    const systemParts = [];
-    if (body.system) systemParts.push(typeof body.system === "string" ? body.system : extractText(body.system));
-    for (const m of body.messages ?? [])
-      if (m?.role === "system") { const t = extractText(m.content); if (t) systemParts.push(t); }
-
-    const out = { model, input, stream: body.stream ?? false };
-    if (systemParts.length) out.instructions = systemParts.join("\n\n");
-    if (body.max_tokens != null) out.max_output_tokens = body.max_tokens;
-    if (body.temperature != null) out.temperature = body.temperature;
-    const effort = mapEffort(body.output_config?.effort, model);
-    if (effort) out.reasoning = { effort };
-
-    // Tools: translate function tools + tool_choice (only when tools present).
-    const tools = mapTools(body.tools);
-    if (tools) {
-      out.tools = tools;
-      const tc = mapToolChoice(body.tool_choice);
-      if (tc != null) out.tool_choice = tc;
-    }
-    return out;
-  }
-
-  // message items -> text blocks; function_call items -> tool_use blocks.
-  function responsesToAnthropic(r, model) {
-    const content = [];
-    let hasToolUse = false;
-    for (const item of r.output ?? []) {
-      if (item?.type === "message") {
-        for (const c of item.content ?? [])
-          if (c?.type === "output_text") content.push({ type: "text", text: c.text ?? "" });
-      } else if (item?.type === "function_call") {
-        hasToolUse = true;
-        let input = {};
-        try { input = item.arguments ? JSON.parse(item.arguments) : {}; } catch { input = {}; }
-        content.push({ type: "tool_use", id: item.call_id || item.id, name: item.name, input });
-      }
-    }
-    if (!content.length) content.push({ type: "text", text: "" });
-    return {
-      id: "msg_" + (r.id ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24),
-      type: "message", role: "assistant",
-      content,
-      model,
-      stop_reason: responsesStopReason(r, hasToolUse),
-      stop_sequence: null,
-      usage: { input_tokens: r.usage?.input_tokens ?? 0, output_tokens: r.usage?.output_tokens ?? 0 },
-    };
-  }
-
-  // Each Responses output item becomes an Anthropic content block: message ->
-  // text (text_delta), function_call -> tool_use (input_json_delta). Blocks open
-  // on output_item.added and close on output_item.done; we assign our own
-  // contiguous block index (reasoning items are skipped, so Responses
-  // output_index is not directly reusable).
-  function streamResponsesToAnthropic(upRes, res, model) {
-    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-    const sse = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-
-    let buf = "", eventType = null;
-    let started = false, sawToolUse = false, outTokens = 0, inTokens = 0;
-    const blocks = new Map(); // Responses output_index -> { index, closed }
-    let nextIndex = 0;
-
-    const start = (r) => {
-      if (started) return;
-      const id = "msg_" + ((r && r.id) || "stream").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24);
-      sse("message_start", { type: "message_start", message: {
-        id, type: "message", role: "assistant", content: [], model,
-        stop_reason: null, stop_sequence: null, usage: { input_tokens: r?.usage?.input_tokens ?? 0, output_tokens: 0 } } });
-      sse("ping", { type: "ping" });
-      started = true;
-    };
-
-    const open = (oi, block) => {
-      if (blocks.has(oi)) return blocks.get(oi);
-      const entry = { index: nextIndex++, closed: false };
-      blocks.set(oi, entry);
-      sse("content_block_start", { type: "content_block_start", index: entry.index, content_block: block });
-      return entry;
-    };
-
-    const close = (oi) => {
-      const b = blocks.get(oi);
-      if (!b || b.closed) return;
-      b.closed = true;
-      sse("content_block_stop", { type: "content_block_stop", index: b.index });
-    };
-
-    const finish = (r) => {
-      outTokens = r?.usage?.output_tokens ?? outTokens;
-      // Responses reports usage only on the terminal event (message_start had
-      // input_tokens:0). Carry input_tokens through the final message_delta so
-      // Claude Code's context meter can track the conversation size.
-      inTokens = r?.usage?.input_tokens ?? inTokens;
-      for (const oi of blocks.keys()) close(oi);
-      sse("message_delta", {
-        type: "message_delta",
-        delta: { stop_reason: responsesStopReason(r ?? {}, sawToolUse), stop_sequence: null },
-        usage: { input_tokens: inTokens, output_tokens: outTokens },
-      });
-      sse("message_stop", { type: "message_stop" });
-    };
-
-    upRes.on("data", (chunk) => {
-      buf += chunk.toString();
-      const lines = buf.split("\n");
-      buf = lines.pop();
-      for (const line of lines) {
-        if (line.startsWith("event: ")) { eventType = line.slice(7).trim(); continue; }
-        if (!line.startsWith("data: ") || !eventType) continue;
-        let p; try { p = JSON.parse(line.slice(6)); } catch { continue; }
-        switch (eventType) {
-          case "response.created":
-          case "response.in_progress":
-            start(p.response);
-            break;
-          case "response.output_item.added": {
-            start();
-            const item = p.item ?? {};
-            const oi = p.output_index ?? 0;
-            if (item.type === "function_call") {
-              sawToolUse = true;
-              open(oi, { type: "tool_use", id: item.call_id || item.id || ("toolu_" + oi), name: item.name || "", input: {} });
-            } else if (item.type === "message") {
-              open(oi, { type: "text", text: "" });
-            }
-            break;
-          }
-          case "response.output_text.delta": {
-            start();
-            const b = open(p.output_index ?? 0, { type: "text", text: "" });
-            sse("content_block_delta", { type: "content_block_delta", index: b.index, delta: { type: "text_delta", text: p.delta ?? "" } });
-            break;
-          }
-          case "response.function_call_arguments.delta": {
-            start();
-            sawToolUse = true;
-            const b = open(p.output_index ?? 0, { type: "tool_use", id: "toolu_" + (p.output_index ?? 0), name: "", input: {} });
-            sse("content_block_delta", { type: "content_block_delta", index: b.index, delta: { type: "input_json_delta", partial_json: p.delta ?? "" } });
-            break;
-          }
-          case "response.output_item.done":
-            close(p.output_index ?? 0);
-            break;
-          case "response.completed":
-          case "response.incomplete":
-          case "response.failed":
-            finish(p.response);
-            break;
-        }
-      }
-    });
-    upRes.on("end", () => {
-      if (started) for (const oi of blocks.keys()) close(oi);
-      res.end();
-    });
-    upRes.on("error", () => res.end());
-  }
-
   async function handleResponsesApiModel(body, res, model) {
     let token;
     try { token = await getCopilotToken(); }
@@ -394,15 +426,17 @@ export function createShimServer(cfg, log = () => {}) {
         headers: { ...COPILOT_HEADERS, Authorization: "Bearer " + token, "Content-Length": bodyBuf.length },
       },
       (upRes) => {
+        // Surface upstream failures (401 expired token, 429 rate limit, 400 bad
+        // request) before any streaming translation writes SSE headers.
+        if (upRes.statusCode !== 200) {
+          log(`${model} -> /v1/responses failed: HTTP ${upRes.statusCode}`);
+          return relayUpstreamError(upRes, res);
+        }
         if (body.stream) return streamResponsesToAnthropic(upRes, res, model);
         let d = "";
         upRes.on("data", (c) => (d += c)).on("end", () => {
           try {
             const r = JSON.parse(d);
-            if (upRes.statusCode !== 200) {
-              res.writeHead(upRes.statusCode, { "content-type": "application/json" });
-              return res.end(JSON.stringify({ error: { type: "error", message: JSON.stringify(r) } }));
-            }
             res.writeHead(200, { "content-type": "application/json" });
             res.end(JSON.stringify(responsesToAnthropic(r, model)));
           } catch (e) {
@@ -482,7 +516,7 @@ export function createShimServer(cfg, log = () => {}) {
         if (body) {
           const requestedModel = (body.model ?? "").replace(/\[1m\]$/i, "");
           const effortOverride = reasoningEffortOverrides[requestedModel];
-          body.model = resolveModel(body.model ?? "");
+          body.model = resolveModel(body.model ?? "", aliases);
           if (effortOverride) body.output_config = { ...(body.output_config || {}), effort: effortOverride };
           const model = body.model;
           if (responsesApiModels.has(model)) { log(`${model} -> /v1/responses`); return handleResponsesApiModel(body, res, model); }
