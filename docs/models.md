@@ -23,7 +23,7 @@ User config is merged over the bundled defaults. After editing, run
   // Dashed ids (claude-opus-4-8) make Claude Code label them correctly.
   // The [1m] suffix asks Claude Code to budget the 1M window; the shim strips it.
   "aliases": {
-    "opus":   "claude-opus-4-8[1m]",
+    "opus":   "claude-opus-5[1m]",
     "sonnet": "claude-sonnet-5[1m]",
     "haiku":  "claude-haiku-4-5",
     "fable":  "gpt-5.6-sol[1m]",
@@ -57,6 +57,7 @@ User config is merged over the bundled defaults. After editing, run
   // Claude Code recognises; non-claude ids get a synthetic prefix so discovery
   // keeps them.
   "discovery": [
+    { "id": "claude-opus-5",   "canonical": "claude-opus-5",    "name": "Claude Opus 5" },
     { "id": "claude-opus-4.8",  "canonical": "claude-opus-4-8",  "name": "Claude Opus 4.8" },
     { "id": "claude-sonnet-5",  "canonical": "claude-sonnet-5",  "name": "Claude Sonnet 5" },
     { "id": "claude-haiku-4.5", "canonical": "claude-haiku-4-5", "name": "Claude Haiku 4.5" },
@@ -77,7 +78,7 @@ User config is merged over the bundled defaults. After editing, run
   "CLAUDE_CODE_USE_FOUNDRY": "1",
   "ANTHROPIC_FOUNDRY_BASE_URL": "http://localhost:4142",
   "ANTHROPIC_FOUNDRY_API_KEY": "cc-copilot",
-  "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8[1m]",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5[1m]",
   "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5[1m]",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5",
   "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-5.6-sol[1m]",
@@ -90,7 +91,7 @@ User config is merged over the bundled defaults. After editing, run
 ```
 
 So in Claude Code:
-- `/model opus` → `claude-opus-4-8[1m]`
+- `/model opus` → `claude-opus-5[1m]`
 - `/model sonnet` → `claude-sonnet-5[1m]`
 - `/model haiku` → `claude-haiku-4-5`
 - `/model fable` → `gpt-5.6-sol[1m]` (shows as **GPT-5.6 Sol (1M)**)

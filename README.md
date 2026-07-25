@@ -4,7 +4,7 @@
 
 cc-copilot runs a small local proxy that translates between Claude Code and
 GitHub Copilot's model API, and wires Claude Code up to use it with **no
-claude.ai login required**. You get Claude (Opus 4.8, Sonnet 5, Haiku 4.5) and
+claude.ai login required**. You get Claude (Opus 5, Sonnet 5, Haiku 4.5) and
 GPT‑5.5, all billed through your existing Copilot subscription.
 
 ```
@@ -55,7 +55,7 @@ Then just run **`claude`** — no login screen, and the `/model` picker offers:
 
 | Alias    | Model           | Notes                              |
 | -------- | --------------- | ---------------------------------- |
-| `opus`   | Claude Opus 4.8 | 1M context, default                |
+| `opus`   | Claude Opus 5   | 1M context, default                |
 | `sonnet` | Claude Sonnet 5 | 1M context                         |
 | `haiku`  | Claude Haiku 4.5| fast / background                  |
 | `fable`  | GPT‑5.5         | 1.05M context, reasoning effort    |
