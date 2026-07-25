@@ -355,6 +355,15 @@ export function relayUpstreamError(upRes, res) {
   });
 }
 
+// Copilot tokens are opaque `key=value;...` strings carrying an `exp` (unix
+// seconds). Return the absolute expiry in ms, or null if absent/unparseable.
+export function tokenExpiryMs(token) {
+  const m = /(?:^|;)exp=(\d+)/.exec(String(token ?? ""));
+  if (!m) return null;
+  const ms = Number(m[1]) * 1000;
+  return Number.isFinite(ms) ? ms : null;
+}
+
 /**
  * Build the shim HTTP server.
  * @param {object} cfg  output of loadConfig()
@@ -364,7 +373,18 @@ export function relayUpstreamError(upRes, res) {
 export function createShimServer(cfg, log = () => {}) {
   const { shimPort, apiPort, aliases, responsesApiModels, reasoningEffortOverrides, canonicalById, discoveryAllow } = cfg;
 
-  function getCopilotToken() {
+  // Copilot tokens live ~25 minutes. Cache until shortly before expiry so the
+  // hot path skips a round trip to copilot-api on every request; concurrent
+  // misses share one fetch, and any 401 drops the cache so a revoked or
+  // early-expired token can't wedge the shim.
+  const TOKEN_EXPIRY_MARGIN_MS = 60_000;
+  const TOKEN_FALLBACK_TTL_MS = 5 * 60_000;
+  let tokenCache = { value: null, expiresAt: 0 };
+  let tokenInflight = null;
+
+  function invalidateToken() { tokenCache = { value: null, expiresAt: 0 }; }
+
+  function fetchCopilotToken() {
     return new Promise((resolve, reject) => {
       const req = http.request(
         { host: "127.0.0.1", port: apiPort, path: "/token", method: "GET" },
@@ -379,6 +399,23 @@ export function createShimServer(cfg, log = () => {}) {
       req.on("error", reject);
       req.end();
     });
+  }
+
+  function getCopilotToken() {
+    if (tokenCache.value && Date.now() < tokenCache.expiresAt) return Promise.resolve(tokenCache.value);
+    if (tokenInflight) return tokenInflight;
+    tokenInflight = fetchCopilotToken()
+      .then((token) => {
+        if (!token) throw new Error("copilot-api returned no token");
+        const exp = tokenExpiryMs(token);
+        tokenCache = {
+          value: token,
+          expiresAt: exp ? exp - TOKEN_EXPIRY_MARGIN_MS : Date.now() + TOKEN_FALLBACK_TTL_MS,
+        };
+        return token;
+      })
+      .finally(() => { tokenInflight = null; });
+    return tokenInflight;
   }
 
   // ---- Route 1: Claude models -> Copilot /v1/messages (native) ----
@@ -400,6 +437,8 @@ export function createShimServer(cfg, log = () => {}) {
         headers: { ...COPILOT_HEADERS, Authorization: "Bearer " + token, "Content-Length": bodyBuf.length },
       },
       (upRes) => {
+        // Drop the cached token so the next request re-fetches a fresh one.
+        if (upRes.statusCode === 401) invalidateToken();
         res.writeHead(upRes.statusCode || 502, upRes.headers);
         upRes.pipe(res);
       },
@@ -429,6 +468,7 @@ export function createShimServer(cfg, log = () => {}) {
         // Surface upstream failures (401 expired token, 429 rate limit, 400 bad
         // request) before any streaming translation writes SSE headers.
         if (upRes.statusCode !== 200) {
+          if (upRes.statusCode === 401) invalidateToken();
           log(`${model} -> /v1/responses failed: HTTP ${upRes.statusCode}`);
           return relayUpstreamError(upRes, res);
         }

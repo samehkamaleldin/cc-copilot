@@ -16,6 +16,7 @@ import { loadConfig } from "../src/config.mjs";
 import { runDaemon } from "../src/daemon.mjs";
 import { installClaudeConfig, uninstallClaudeConfig } from "../src/claude-config.mjs";
 import { getService } from "../src/service.mjs";
+import { diffEnvBlock, checkModels, configuredModelIds } from "../src/health.mjs";
 import { logDir, dataDir, npxCommand, claudeSettingsPath, REPO_ROOT } from "../src/paths.mjs";
 
 const cmd = process.argv[2];
@@ -80,6 +81,26 @@ function doUninstall() {
   out("Done. (copilot-api credentials are left intact; remove them manually if desired.)");
 }
 
+function readSettingsEnv() {
+  try { return JSON.parse(fs.readFileSync(claudeSettingsPath(), "utf8")).env || {}; }
+  catch { return {}; }
+}
+
+/** Model ids copilot-api currently exposes (empty if it isn't reachable). */
+function fetchUpstreamModelIds(port) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port, path: "/v1/models", timeout: 4000 }, (res) => {
+      let d = "";
+      res.on("data", (c) => (d += c)).on("end", () => {
+        try { resolve((JSON.parse(d).data || []).map((m) => m.id).filter(Boolean)); }
+        catch { resolve([]); }
+      });
+    });
+    req.on("error", () => resolve([]));
+    req.on("timeout", () => { req.destroy(); resolve([]); });
+  });
+}
+
 async function doStatus() {
   const cfg = loadConfig();
   out("Service:");
@@ -87,6 +108,12 @@ async function doStatus() {
   out("Ports:");
   out(`  copilot-api :${cfg.apiPort} -> ${await httpCode(cfg.apiPort) || "down"}`);
   out(`  shim        :${cfg.shimPort} -> ${await httpCode(cfg.shimPort) || "down"}`);
+  const drift = diffEnvBlock(cfg, readSettingsEnv());
+  if (drift.length) {
+    out("");
+    out(`⚠ ${drift.length} Claude Code setting(s) differ from config/models.json.`);
+    out("  Run `cc-copilot install` to apply, or `cc-copilot doctor` for details.");
+  }
 }
 
 function doLogs() {
@@ -118,6 +145,33 @@ async function doDoctor() {
   out(`shim        :${cfg.shimPort} : ${await httpCode(cfg.shimPort) || "down"}`);
   const settingsOk = (() => { try { return JSON.parse(fs.readFileSync(claudeSettingsPath(), "utf8")).env?.CLAUDE_CODE_USE_FOUNDRY === "1"; } catch { return false; } })();
   out(`foundry config  : ${settingsOk ? "present" : "MISSING (run `cc-copilot install`)"}`);
+
+  // Settings drift: config/models.json vs what Claude Code actually reads.
+  out("\nClaude Code settings vs config/models.json:");
+  const drift = diffEnvBlock(cfg, readSettingsEnv());
+  if (!drift.length) {
+    out("  in sync");
+  } else {
+    for (const { key, expected, actual } of drift) {
+      out(`  ${key}`);
+      out(`    config   : ${expected}`);
+      out(`    settings : ${actual ?? "(unset)"}`);
+    }
+    out("  -> run `cc-copilot install` to apply");
+  }
+
+  // Model drift: pinned ids that vanished upstream, or newer versions available.
+  out("\nModels:");
+  const upstream = await fetchUpstreamModelIds(cfg.apiPort);
+  if (!upstream.length) {
+    out("  (copilot-api unreachable — skipped)");
+  } else {
+    const { missing, newer } = checkModels(configuredModelIds(cfg), upstream);
+    if (!missing.length && !newer.length) out("  all configured models exist upstream; none outdated");
+    for (const id of missing) out(`  ✖ ${id} — no longer offered by Copilot`);
+    for (const { configured, latest } of newer) out(`  ↑ ${configured} — newer available upstream: ${latest}`);
+    if (newer.length) out("  -> update config/models.json, then `cc-copilot install`");
+  }
 }
 
 function usage() {
