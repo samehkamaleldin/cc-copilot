@@ -24,11 +24,11 @@
   "tierLabels": {
     "fable": { "name": "GPT-5.6 Sol Ultra (1M)", "description": "GPT-5.6 Sol via GitHub Copilot — max reasoning, 1M context" }
   },
-  "//customModelOption": "One extra row added to Claude Code's /model picker via ANTHROPIC_CUSTOM_MODEL_OPTION. Foundry mode supports a single custom option; additional models remain reachable by typing their id in /model. The [1m] suffix budgets the 1M window (stripped by the shim before Copilot).",
+  "//customModelOption": "One extra row added to Claude Code's /model picker via ANTHROPIC_CUSTOM_MODEL_OPTION. Foundry mode supports a single custom option; additional models remain reachable by typing their id in /model. The [1m] suffix budgets the 1M window (stripped by the shim before Copilot). This is the effort-customizable Sol (use /effort); Fable is Sol pinned to max reasoning.",
   "customModelOption": {
-    "id": "gpt-5.6-luna[1m]",
-    "name": "GPT-5.6 Luna (1M)",
-    "description": "GPT-5.6 Luna via GitHub Copilot — 1M context"
+    "id": "gpt-5.6-sol[1m]",
+    "name": "GPT-5.6 Sol (1M)",
+    "description": "GPT-5.6 Sol via GitHub Copilot — 1M context, effort set by /effort"
   },
   "//defaultModel": "Session default written to the Claude `model` setting.",
   "defaultModel": "opus",
