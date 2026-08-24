@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./config.mjs";
 import { createShimServer } from "./shim.mjs";
-import { logDir, npxCommand } from "./paths.mjs";
+import { logDir, copilotApiEntry } from "./paths.mjs";
 
 function ts() { return new Date().toISOString(); }
 
@@ -51,10 +51,19 @@ export async function runDaemon() {
 
   dlog(`starting cc-copilot daemon (shim :${cfg.shimPort}, copilot-api :${cfg.apiPort})`);
 
-  // 1. Spawn copilot-api.
-  const api = spawn(npxCommand(), ["-y", "copilot-api@latest", "start", "--port", String(cfg.apiPort)], {
+  // 1. Spawn copilot-api by running its vendored entry point with `node`
+  //    directly. This avoids launching `npx.cmd` through a shell (which, when
+  //    given an args array, emits Node's DEP0190 security deprecation warning)
+  //    and pins the installed version instead of re-resolving @latest.
+  let apiEntry;
+  try {
+    apiEntry = copilotApiEntry();
+  } catch (e) {
+    dlog(`cannot locate copilot-api: ${e.message}`);
+    process.exit(1);
+  }
+  const api = spawn(process.execPath, [apiEntry, "start", "--port", String(cfg.apiPort)], {
     stdio: ["ignore", "pipe", "pipe"],
-    shell: process.platform === "win32",
   });
   api.stdout.pipe(logs.api);
   api.stderr.pipe(logs.api);
@@ -89,7 +98,14 @@ export async function runDaemon() {
     return shutdown(1);
   }
 
-  const shim = createShimServer(cfg, (m) => logs.shim.write(`[${ts()}] ${m}\n`));
+  // The shim emits one pre-formatted (ANSI-colored) line per LLM call. Tee it
+  // to both the live console and shim.log so `cc-copilot logs` stays colorful.
+  const shimLog = (m) => {
+    const line = m.endsWith("\n") ? m : m + "\n";
+    logs.shim.write(line);
+    process.stdout.write(line);
+  };
+  const shim = createShimServer(cfg, shimLog);
   shim.on("error", (e) => { dlog(`shim error: ${e.message}`); shutdown(1); });
   shim.listen(cfg.shimPort, "127.0.0.1", () => {
     dlog(`shim listening on http://127.0.0.1:${cfg.shimPort}`);

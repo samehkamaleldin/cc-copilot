@@ -116,6 +116,7 @@ cc-copilot start       Start the background service
 cc-copilot stop        Stop the background service
 cc-copilot restart     Restart the background service
 cc-copilot status      Service + port health
+cc-copilot cost        Copilot credit spend ($) + token totals
 cc-copilot logs        Tail proxy logs
 cc-copilot doctor      Diagnose the setup
 cc-copilot serve       Run the proxy in the foreground (used by the service)

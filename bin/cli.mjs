@@ -17,7 +17,7 @@ import { runDaemon } from "../src/daemon.mjs";
 import { installClaudeConfig, uninstallClaudeConfig } from "../src/claude-config.mjs";
 import { getService } from "../src/service.mjs";
 import { diffEnvBlock, checkModels, configuredModelIds } from "../src/health.mjs";
-import { logDir, dataDir, npxCommand, claudeSettingsPath, REPO_ROOT } from "../src/paths.mjs";
+import { logDir, dataDir, npxCommand, copilotApiEntry, claudeSettingsPath, REPO_ROOT } from "../src/paths.mjs";
 
 const cmd = process.argv[2];
 const args = process.argv.slice(3);
@@ -38,9 +38,10 @@ function httpCode(port, p = "/v1/models") {
 async function doAuth() {
   out("Starting GitHub Copilot device authentication...");
   out("A code and URL will appear below — open the URL and enter the code.\n");
-  const r = spawnSync(npxCommand(), ["-y", "copilot-api@latest", "auth"], {
+  // Run the vendored copilot-api entry with `node` directly (no npx/shell) so
+  // Node's DEP0190 shell-args deprecation warning never fires.
+  const r = spawnSync(process.execPath, [copilotApiEntry(), "auth"], {
     stdio: "inherit",
-    shell: process.platform === "win32",
   });
   process.exit(r.status ?? 0);
 }
@@ -116,6 +117,57 @@ async function doStatus() {
   }
 }
 
+function fetchJson(port, p) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port, path: p, timeout: 8000 }, (res) => {
+      let d = "";
+      res.on("data", (c) => (d += c)).on("end", () => {
+        try { resolve(JSON.parse(d)); } catch { resolve(null); }
+      });
+    });
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
+  });
+}
+
+function fmtInt(n) { return n == null ? "?" : Number(n).toLocaleString("en-US"); }
+
+async function doCost() {
+  const cfg = loadConfig();
+  const s = await fetchJson(cfg.shimPort, "/stats");
+  if (!s) {
+    err(`Proxy not reachable on :${cfg.shimPort}. Is it running?  (cc-copilot status)`);
+    process.exit(1);
+  }
+  const m = s.money, q = s.quota, sess = s.session || { requests: 0, inputTokens: 0, outputTokens: 0 };
+  const all = s.allTime?.totals || { requests: 0, input: 0, output: 0 };
+  const money = (d) => d == null ? "$—" : "$" + Number(d).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  out(`Copilot spend  (${m ? m.creditsPerDollar : 100} credits = $1.00)`);
+  if (m) {
+    out(`  This month    : ${money(m.monthly)} used` +
+        (m.remaining != null ? `   (${money(m.remaining)} left${m.entitlement != null ? ` of ${money(m.entitlement)}` : ""}${q?.percentRemaining != null ? `, ${q.percentRemaining}%` : ""}, resets ${q?.resetDate ?? "?"})` : ""));
+    const avg = sess.requests && m.session != null ? m.session / sess.requests : null;
+    out(`  This session  : ${money(m.session)}   (${fmtInt(sess.requests)} requests${avg != null ? `, avg ${money(avg)}/req` : ""})`);
+    if (q && q.plan) out(`  Plan          : ${q.plan}`);
+  } else {
+    out("  (no premium-interaction credit quota reported by Copilot)");
+  }
+  out("");
+  out("Tokens");
+  out(`  This session  : ${fmtInt(sess.inputTokens)} in · ${fmtInt(sess.outputTokens)} out   (${fmtInt(sess.requests)} req)`);
+  out(`  All-time      : ${fmtInt(all.input)} in · ${fmtInt(all.output)} out   (${fmtInt(all.requests)} req, since ${(s.allTime?.since || "?").slice(0, 10)})`);
+  const byModel = s.allTime?.byModel || {};
+  const models = Object.keys(byModel).sort((a, b) => byModel[b].requests - byModel[a].requests);
+  if (models.length) {
+    out("");
+    out("  All-time by model:");
+    for (const name of models) {
+      const b = byModel[name];
+      out(`    ${name.padEnd(22)} ${fmtInt(b.requests).padStart(7)} req  ${fmtInt(b.input)} in · ${fmtInt(b.output)} out`);
+    }
+  }
+}
+
 function doLogs() {
   const dir = logDir();
   const files = ["shim.log", "copilot-api.log", "daemon.log"].map((f) => path.join(dir, f)).filter((f) => fs.existsSync(f));
@@ -132,10 +184,11 @@ async function doDoctor() {
   out("cc-copilot doctor\n");
   out(`platform        : ${process.platform} (${process.arch})`);
   out(`node            : ${process.version}`);
-  const npx = spawnSync(npxCommand(), ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
+  // Single-string commands under a shell (no args array) so DEP0190 never fires.
+  const npx = spawnSync(`${npxCommand()} --version`, { encoding: "utf8", shell: true });
   out(`npx             : ${(npx.stdout || "missing").trim()}`);
   // Resolve `claude` via the shell so Windows honours PATHEXT (.exe / .cmd / .bat).
-  const claude = spawnSync("claude", ["--version"], { encoding: "utf8", shell: process.platform === "win32" });
+  const claude = spawnSync("claude --version", { encoding: "utf8", shell: true });
   out(`claude code     : ${(claude.stdout || "not found on PATH").trim()}`);
   out(`install dir     : ${REPO_ROOT}`);
   out(`data dir        : ${dataDir()}`);
@@ -185,6 +238,7 @@ Usage:
   cc-copilot stop        Stop the background service
   cc-copilot restart     Restart the background service
   cc-copilot status      Show service + port health
+  cc-copilot cost        Show Copilot credit spend + token totals
   cc-copilot logs        Tail proxy logs
   cc-copilot doctor      Diagnose the setup
   cc-copilot serve       Run the proxy in the foreground (used by the service)
@@ -204,6 +258,7 @@ Typical first run:
       case "stop": return void getService().stop();
       case "restart": getService().stop(); return void getService().start();
       case "status": return void (await doStatus());
+      case "cost": case "usage": return void (await doCost());
       case "logs": return void doLogs();
       case "doctor": return void (await doDoctor());
       case "-h": case "--help": case "help": case undefined: return void usage();

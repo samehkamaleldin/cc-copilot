@@ -1,9 +1,12 @@
 // Cross-platform path helpers for cc-copilot.
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 
 /** Repo root (one level up from src/). */
 export const REPO_ROOT = path.resolve(__dirname, "..");
@@ -39,7 +42,29 @@ export function userModelsConfigPath() {
   return path.join(dataDir(), "models.json");
 }
 
+/** Persistent per-user usage accumulator (token totals across restarts). */
+export function usageStatePath() {
+  return path.join(dataDir(), "usage.json");
+}
+
 /** Path to the npx executable, accounting for Windows. */
 export function npxCommand() {
   return process.platform === "win32" ? "npx.cmd" : "npx";
+}
+
+/**
+ * Absolute path to the locally-installed `copilot-api` CLI entry
+ * (`node_modules/copilot-api/dist/main.js`). Running this with `node` directly
+ * avoids spawning `npx.cmd` through a shell — which, with an args array, trips
+ * Node's DEP0190 deprecation warning — and pins the vendored version instead of
+ * re-resolving `@latest` on every start.
+ */
+export function copilotApiEntry() {
+  const candidates = [];
+  try { candidates.push(require.resolve("copilot-api/dist/main.js")); } catch { /* not resolvable */ }
+  candidates.push(path.join(REPO_ROOT, "node_modules", "copilot-api", "dist", "main.js"));
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) return c; } catch { /* ignore */ }
+  }
+  throw new Error(`copilot-api not found — run \`npm install\` in ${REPO_ROOT}`);
 }

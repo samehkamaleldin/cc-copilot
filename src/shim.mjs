@@ -19,6 +19,8 @@
 // GET /token endpoint, then used directly against api.githubcopilot.com.
 import http from "node:http";
 import https from "node:https";
+import fs from "node:fs";
+import { usageStatePath } from "./paths.mjs";
 
 const COPILOT_HOST = "api.githubcopilot.com";
 const DISCOVERY_PREFIX = "anthropic-copilot-";
@@ -40,6 +42,101 @@ const ALLOWED_MESSAGES_FIELDS = new Set([
 
 // Reasoning efforts accepted by current Responses API models.
 const RESPONSES_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
+
+/* --------------------------- per-call logging ---------------------------- */
+// One colorful line per LLM call, metrics separated by " · ":
+//   time · status · model · route · [stream] · latency · req tokens ·
+//   session tokens · $/req · $/session · $/month.
+// Colors are plain ANSI SGR codes (disabled when NO_COLOR is set) so they
+// render both in a live terminal and via `cc-copilot logs`.
+const C = {
+  reset: "\x1b[0m", dim: "\x1b[2m", bold: "\x1b[1m",
+  red: "\x1b[31m", green: "\x1b[32m", yellow: "\x1b[33m",
+  blue: "\x1b[34m", magenta: "\x1b[35m", cyan: "\x1b[36m", gray: "\x1b[90m",
+};
+const USE_COLOR = !process.env.NO_COLOR;
+function paint(s, ...codes) { return USE_COLOR ? codes.join("") + s + C.reset : String(s); }
+
+function latColor(ms) { return ms < 2000 ? C.green : ms < 10000 ? C.yellow : C.red; }
+
+// Copilot premium-interaction credits per US dollar (100 credits = $1.00).
+// Override with CC_COPILOT_CREDITS_PER_DOLLAR if your plan's rate differs.
+export const CREDITS_PER_DOLLAR = Number(process.env.CC_COPILOT_CREDITS_PER_DOLLAR) || 100;
+function fmtMoney(d) { return d == null ? "$—" : "$" + Number(d).toFixed(2); }
+
+/** Compact token counts: 812 -> "812", 12_300 -> "12.3k", 3_400_000 -> "3.40M". */
+function fmtCompact(n) {
+  n = Number(n || 0);
+  if (n < 1000) return String(n);
+  if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + "k";
+  return (n / 1e6).toFixed(2) + "M";
+}
+
+/**
+ * Pull token usage out of a response body fragment. Handles both Anthropic
+ * (input_tokens / output_tokens) and OpenAI (prompt_tokens / completion_tokens)
+ * shapes, and streamed bodies where the final output count appears last.
+ */
+export function extractUsage(text) {
+  const first = /"(?:input_tokens|prompt_tokens)"\s*:\s*(\d+)/.exec(text);
+  const re = /"(?:output_tokens|completion_tokens)"\s*:\s*(\d+)/g;
+  let last = null, m;
+  while ((m = re.exec(text))) last = m;
+  return { input: first ? Number(first[1]) : null, output: last ? Number(last[1]) : null };
+}
+
+/**
+ * Reduce a copilot-api /usage snapshot to the premium-interaction credit figures
+ * that represent real spend. Returns null if the snapshot lacks that quota.
+ */
+export function summarizeQuota(snapshot) {
+  const p = snapshot?.quota_snapshots?.premium_interactions;
+  if (!p) return null;
+  const used = p.credits_used != null
+    ? p.credits_used
+    : (p.entitlement != null && p.remaining != null ? p.entitlement - p.remaining : null);
+  return {
+    used,
+    remaining: p.remaining ?? null,
+    entitlement: p.entitlement ?? null,
+    percentRemaining: p.percent_remaining ?? null,
+    unlimited: !!p.unlimited,
+    plan: snapshot?.copilot_plan ?? null,
+    resetDate: snapshot?.quota_reset_date ?? null,
+  };
+}
+
+/** Format a single LLM-call log line (colored unless NO_COLOR). Metrics are
+ *  separated by " · " (no column padding). */
+export function formatCallLine({ time, status, model, route, stream, ms, usage, error, money, sessionTokens }) {
+  const SEP = paint(" · ", C.gray);
+  const ok = !error && status >= 200 && status < 300;
+  const statusColor = error || !status || status >= 500 ? C.red : status >= 400 ? C.yellow : C.green;
+  const parts = [
+    paint(time, C.gray),
+    paint(`${ok ? "✓" : "✗"} ${status || "ERR"}`, statusColor, C.bold),
+    paint(model || "?", C.cyan, C.bold),
+    paint(route || "", C.magenta),
+  ];
+  if (stream) parts.push(paint("stream", C.dim));
+  if (ms != null) parts.push(paint(ms + "ms", latColor(ms)));
+  if (error) { parts.push(paint(error, C.red)); return parts.join(SEP); }
+  // Request tokens (↑ in / ↓ out).
+  if (usage && (usage.input != null || usage.output != null)) {
+    parts.push(paint("↑" + fmtCompact(usage.input ?? 0), C.blue) + " " + paint("↓" + fmtCompact(usage.output ?? 0), C.green));
+  }
+  // Session tokens (Σ ↑ in / ↓ out).
+  if (sessionTokens && (sessionTokens.input || sessionTokens.output)) {
+    parts.push(paint("Σ ↑" + fmtCompact(sessionTokens.input), C.blue) + " " + paint("↓" + fmtCompact(sessionTokens.output), C.green));
+  }
+  // Money: this request · this session · this month (US$).
+  if (money) {
+    parts.push(paint(fmtMoney(money.req) + " req", C.green, C.bold));
+    parts.push(paint(fmtMoney(money.session) + " ses", C.cyan));
+    parts.push(paint(fmtMoney(money.monthly) + " mo", C.yellow));
+  }
+  return parts.join(SEP);
+}
 
 function extractText(content) {
   if (typeof content === "string") return content;
@@ -390,6 +487,132 @@ export function createShimServer(cfg, log = () => {}) {
 
   function invalidateToken() { tokenCache = { value: null, expiresAt: 0 }; }
 
+  /* ---- usage accumulation (tokens) + live credit quota ---- */
+
+  // Persistent token totals, so cumulative figures survive daemon restarts.
+  const statePath = usageStatePath();
+  function loadStats() {
+    try {
+      const s = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      if (s && s.totals) return s;
+    } catch { /* fresh start */ }
+    return { since: new Date().toISOString(), totals: { requests: 0, input: 0, output: 0 }, byModel: {} };
+  }
+  const stats = loadStats();
+  let saveTimer = null;
+  function saveStatsSoon() {
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      try { fs.writeFileSync(statePath, JSON.stringify(stats, null, 2)); } catch { /* best effort */ }
+    }, 1000);
+    if (saveTimer.unref) saveTimer.unref();
+  }
+  function recordUsage(model, usage) {
+    const inp = Number(usage?.input ?? 0), out = Number(usage?.output ?? 0);
+    stats.totals.requests += 1;
+    stats.totals.input += inp;
+    stats.totals.output += out;
+    const bm = (stats.byModel[model] ||= { requests: 0, input: 0, output: 0 });
+    bm.requests += 1; bm.input += inp; bm.output += out;
+    saveStatsSoon();
+  }
+
+  // Live Copilot credit quota, sampled from copilot-api /usage. credits_used is
+  // GitHub's authoritative running spend for this billing period (resets
+  // monthly); at 100 credits = $1 it converts directly to dollars. We sample
+  // just after each request finishes (throttled) so per-request deltas stay
+  // reasonably live without blocking the response or hammering the API.
+  const QUOTA_TTL_MS = 2_000;
+  let quotaCache = { snapshot: null, fetchedAt: 0 };
+  let quotaInflight = null;
+  let sessionStartCredits = null; // credits_used when this proxy process started
+  let lastReqCredits = null;      // credits_used at the previous logged request
+  let sessionRequests = 0;        // successful calls since this proxy started
+  let sessionInput = 0, sessionOutput = 0; // tokens since this proxy started
+  const sessionStartAt = new Date().toISOString();
+  function fetchUsage() {
+    return new Promise((resolve, reject) => {
+      const req = http.get({ host: "127.0.0.1", port: apiPort, path: "/usage", timeout: 5000 }, (r) => {
+        let d = ""; r.on("data", (c) => (d += c)).on("end", () => {
+          try { resolve(JSON.parse(d)); } catch (e) { reject(e); }
+        });
+      });
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("usage timeout")); });
+    });
+  }
+  // Ensure a reasonably fresh quota snapshot, coalescing concurrent callers and
+  // throttling to QUOTA_TTL_MS. Never rejects — keeps the last known value.
+  function ensureQuota() {
+    if (Date.now() - quotaCache.fetchedAt < QUOTA_TTL_MS) return Promise.resolve();
+    if (quotaInflight) return quotaInflight;
+    quotaInflight = fetchUsage()
+      .then((u) => {
+        quotaCache = { snapshot: u, fetchedAt: Date.now() };
+        const q = summarizeQuota(u);
+        if (q && q.used != null && sessionStartCredits == null) {
+          sessionStartCredits = q.used;
+          lastReqCredits = q.used;
+        }
+      })
+      .catch(() => { /* keep last known */ })
+      .finally(() => { quotaInflight = null; });
+    return quotaInflight;
+  }
+  // Capture the session baseline up front so per-session spend starts at $0.00.
+  ensureQuota();
+
+  // Convert the current quota snapshot into per-request / per-session / monthly
+  // dollar figures. Per-request is the credit delta since the last logged call
+  // (credits update server-side with slight lag, so a call's cost may land on a
+  // subsequent line; the session and monthly totals stay authoritative).
+  function currentMoney() {
+    const q = summarizeQuota(quotaCache.snapshot);
+    if (!q || q.used == null) return null;
+    if (sessionStartCredits == null) { sessionStartCredits = q.used; lastReqCredits = q.used; }
+    const reqDelta = Math.max(0, q.used - (lastReqCredits ?? q.used));
+    lastReqCredits = q.used;
+    return {
+      req: reqDelta / CREDITS_PER_DOLLAR,
+      session: (q.used - sessionStartCredits) / CREDITS_PER_DOLLAR,
+      monthly: q.used / CREDITS_PER_DOLLAR,
+    };
+  }
+
+  // Emit one formatted call line via the injected logger, folding in the
+  // request's token usage (recorded for /stats) and the live dollar spend.
+  async function logCall(meta) {
+    if (meta.usage && !meta.error) {
+      recordUsage(meta.model, meta.usage);
+      sessionRequests += 1;
+      sessionInput += Number(meta.usage.input ?? 0);
+      sessionOutput += Number(meta.usage.output ?? 0);
+    } else if (!meta.error) {
+      sessionRequests += 1;
+    }
+    await ensureQuota();
+    log(formatCallLine({
+      time: new Date().toTimeString().slice(0, 8),
+      ...meta,
+      money: meta.error ? null : currentMoney(),
+      sessionTokens: { input: sessionInput, output: sessionOutput },
+    }));
+  }
+
+  // Passively sample a response stream (without consuming it) to recover token
+  // usage for logging. Keeps a bounded head+tail so large bodies stay cheap.
+  function tapUsage(stream) {
+    const CAP = 8192;
+    let head = "", tail = "";
+    stream.on("data", (c) => {
+      const s = c.toString("utf8");
+      if (head.length < CAP) head += s.slice(0, CAP - head.length);
+      tail = (tail + s).slice(-CAP);
+    });
+    return () => extractUsage(head + "\n" + tail);
+  }
+
   function fetchCopilotToken() {
     return new Promise((resolve, reject) => {
       const req = http.request(
@@ -426,9 +649,12 @@ export function createShimServer(cfg, log = () => {}) {
 
   // ---- Route 1: Claude models -> Copilot /v1/messages (native) ----
   async function handleClaudeNative(body, res) {
+    const startedAt = Date.now();
+    const model = body.model, stream = !!body.stream;
     let token;
     try { token = await getCopilotToken(); }
     catch (e) {
+      logCall({ status: 502, model, route: "native", stream, ms: Date.now() - startedAt, error: "token: " + e.message });
       res.writeHead(502, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { type: "error", message: "Copilot token error: " + e.message } }));
     }
@@ -445,11 +671,17 @@ export function createShimServer(cfg, log = () => {}) {
       (upRes) => {
         // Drop the cached token so the next request re-fetches a fresh one.
         if (upRes.statusCode === 401) invalidateToken();
+        const getUsage = tapUsage(upRes);
         res.writeHead(upRes.statusCode || 502, upRes.headers);
         upRes.pipe(res);
+        upRes.on("end", () => logCall({
+          status: upRes.statusCode, model, route: "native", stream,
+          ms: Date.now() - startedAt, usage: getUsage(),
+        }));
       },
     );
     upReq.on("error", (e) => {
+      logCall({ status: 502, model, route: "native", stream, ms: Date.now() - startedAt, error: e.message });
       if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { type: "error", message: "upstream error: " + e.message } }));
     });
@@ -458,9 +690,12 @@ export function createShimServer(cfg, log = () => {}) {
 
   // ---- Route 2: Responses-API models -> Copilot /v1/responses ----
   async function handleResponsesApiModel(body, res, model) {
+    const startedAt = Date.now();
+    const stream = !!body.stream;
     let token;
     try { token = await getCopilotToken(); }
     catch (e) {
+      logCall({ status: 502, model, route: "responses", stream, ms: Date.now() - startedAt, error: "token: " + e.message });
       res.writeHead(502, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { type: "error", message: "Copilot token error: " + e.message } }));
     }
@@ -475,17 +710,29 @@ export function createShimServer(cfg, log = () => {}) {
         // request) before any streaming translation writes SSE headers.
         if (upRes.statusCode !== 200) {
           if (upRes.statusCode === 401) invalidateToken();
-          log(`${model} -> /v1/responses failed: HTTP ${upRes.statusCode}`);
+          logCall({ status: upRes.statusCode, model, route: "responses", stream, ms: Date.now() - startedAt, error: "HTTP " + upRes.statusCode });
           return relayUpstreamError(upRes, res);
         }
-        if (body.stream) return streamResponsesToAnthropic(upRes, res, model);
+        if (body.stream) {
+          const getUsage = tapUsage(upRes);
+          upRes.on("end", () => logCall({
+            status: 200, model, route: "responses", stream: true,
+            ms: Date.now() - startedAt, usage: getUsage(),
+          }));
+          return streamResponsesToAnthropic(upRes, res, model);
+        }
         let d = "";
         upRes.on("data", (c) => (d += c)).on("end", () => {
           try {
             const r = JSON.parse(d);
             res.writeHead(200, { "content-type": "application/json" });
             res.end(JSON.stringify(responsesToAnthropic(r, model)));
+            logCall({
+              status: 200, model, route: "responses", stream: false, ms: Date.now() - startedAt,
+              usage: { input: r.usage?.input_tokens ?? null, output: r.usage?.output_tokens ?? null },
+            });
           } catch (e) {
+            logCall({ status: 502, model, route: "responses", stream: false, ms: Date.now() - startedAt, error: "parse: " + e.message });
             res.writeHead(502, { "content-type": "application/json" });
             res.end(JSON.stringify({ error: { type: "error", message: "parse error: " + e.message } }));
           }
@@ -493,6 +740,7 @@ export function createShimServer(cfg, log = () => {}) {
       },
     );
     upReq.on("error", (e) => {
+      logCall({ status: 502, model, route: "responses", stream, ms: Date.now() - startedAt, error: e.message });
       if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { type: "error", message: "upstream error: " + e.message } }));
     });
@@ -500,14 +748,24 @@ export function createShimServer(cfg, log = () => {}) {
   }
 
   // ---- Route 3: fallback -> copilot-api /chat/completions ----
-  function forwardToCopilotApi(req, outBuf, res) {
+  function forwardToCopilotApi(req, outBuf, res, meta) {
+    const startedAt = Date.now();
     const headers = { ...req.headers, "content-length": Buffer.byteLength(outBuf) };
     delete headers.host;
     const up = http.request(
       { host: "127.0.0.1", port: apiPort, method: req.method, path: req.url, headers },
-      (upRes) => { res.writeHead(upRes.statusCode || 502, upRes.headers); upRes.pipe(res); },
+      (upRes) => {
+        const getUsage = meta ? tapUsage(upRes) : null;
+        res.writeHead(upRes.statusCode || 502, upRes.headers);
+        upRes.pipe(res);
+        if (meta) upRes.on("end", () => logCall({
+          status: upRes.statusCode, model: meta.model, route: "proxy", stream: meta.stream,
+          ms: Date.now() - startedAt, usage: getUsage(),
+        }));
+      },
     );
     up.on("error", (e) => {
+      if (meta) logCall({ status: 502, model: meta.model, route: "proxy", stream: meta.stream, ms: Date.now() - startedAt, error: e.message });
       if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
       res.end("shim upstream error: " + e.message);
     });
@@ -544,6 +802,35 @@ export function createShimServer(cfg, log = () => {}) {
     res.end(JSON.stringify({ object: "list", data }));
   }
 
+  // ---- Usage/cost: GET /stats ----
+  // Accumulated token totals (local, exact) plus the live Copilot credit quota
+  // (real spend this billing period). Refreshes the quota inline, best-effort.
+  async function handleStats(res) {
+    await ensureQuota();
+    const q = summarizeQuota(quotaCache.snapshot);
+    const money = q && q.used != null ? {
+      creditsPerDollar: CREDITS_PER_DOLLAR,
+      monthly: q.used / CREDITS_PER_DOLLAR,
+      session: sessionStartCredits != null ? (q.used - sessionStartCredits) / CREDITS_PER_DOLLAR : null,
+      remaining: q.remaining != null ? q.remaining / CREDITS_PER_DOLLAR : null,
+      entitlement: q.entitlement != null ? q.entitlement / CREDITS_PER_DOLLAR : null,
+    } : null;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      quota: q,
+      money,
+      session: {
+        since: sessionStartAt,
+        requests: sessionRequests,
+        dollars: money ? money.session : null,
+        inputTokens: sessionInput,
+        outputTokens: sessionOutput,
+      },
+      allTime: { since: stats.since, totals: stats.totals, byModel: stats.byModel },
+      quotaFetchedAt: quotaCache.fetchedAt ? new Date(quotaCache.fetchedAt).toISOString() : null,
+    }));
+  }
+
   // ---- HTTP server ----
   const server = http.createServer((req, res) => {
     const chunks = [];
@@ -552,6 +839,7 @@ export function createShimServer(cfg, log = () => {}) {
       let outBuf = Buffer.concat(chunks);
 
       if (req.method === "GET" && req.url.startsWith("/v1/models")) return handleModelsDiscovery(res);
+      if (req.method === "GET" && req.url.startsWith("/stats")) return handleStats(res);
       if (req.method === "GET" && req.url === "/healthz") {
         res.writeHead(200, { "content-type": "application/json" });
         return res.end(JSON.stringify({ ok: true, shimPort, apiPort }));
@@ -565,9 +853,10 @@ export function createShimServer(cfg, log = () => {}) {
           body.model = resolveModel(body.model ?? "", aliases);
           if (effortOverride) body.output_config = { ...(body.output_config || {}), effort: effortOverride };
           const model = body.model;
-          if (responsesApiModels.has(model)) { log(`${model} -> /v1/responses`); return handleResponsesApiModel(body, res, model); }
-          if (/^claude-/i.test(model)) { log(`${model} -> /v1/messages (native)`); return handleClaudeNative(body, res); }
+          if (responsesApiModels.has(model)) return handleResponsesApiModel(body, res, model);
+          if (/^claude-/i.test(model)) return handleClaudeNative(body, res);
           outBuf = Buffer.from(JSON.stringify(body), "utf8");
+          return forwardToCopilotApi(req, outBuf, res, { model, stream: !!body.stream });
         }
       }
       forwardToCopilotApi(req, outBuf, res);
