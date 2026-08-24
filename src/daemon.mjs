@@ -12,9 +12,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./config.mjs";
 import { createShimServer } from "./shim.mjs";
-import { logDir, copilotApiEntry } from "./paths.mjs";
+import { renderBanner } from "./banner.mjs";
+import { logDir, copilotApiEntry, REPO_ROOT } from "./paths.mjs";
 
 function ts() { return new Date().toISOString(); }
+
+function pkgVersion() {
+  try { return JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")).version; }
+  catch { return null; }
+}
 
 function openLog() {
   const dir = logDir();
@@ -49,7 +55,10 @@ export async function runDaemon() {
   const logs = openLog();
   const dlog = (m) => logs.daemon.write(`[${ts()}] ${m}\n`);
 
-  dlog(`starting cc-copilot daemon (shim :${cfg.shimPort}, copilot-api :${cfg.apiPort})`);
+  const version = pkgVersion();
+  // Fancy startup banner to the live console (stdout); a plain marker to the log.
+  process.stdout.write(renderBanner({ version, shimPort: cfg.shimPort, apiPort: cfg.apiPort }) + "\n");
+  dlog(`starting cc-copilot daemon v${version ?? "?"} (shim :${cfg.shimPort}, copilot-api :${cfg.apiPort})`);
 
   // 1. Spawn copilot-api by running its vendored entry point with `node`
   //    directly. This avoids launching `npx.cmd` through a shell (which, when
