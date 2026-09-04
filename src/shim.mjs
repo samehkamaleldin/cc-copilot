@@ -102,7 +102,7 @@ function fmtCompact(n) {
 /**
  * Pull token usage out of a response body fragment. Handles both Anthropic
  * (input_tokens / output_tokens) and OpenAI (prompt_tokens / completion_tokens)
- * shapes, and streamed bodies where the final output count appears last.
+ * shapes, and streamed bodies where the final usage counts appear last.
  *
  * Also recovers prompt-cache figures so cache effectiveness is visible:
  *   - Anthropic: cache_read_input_tokens (prefix served from cache, ~1/10th
@@ -112,20 +112,39 @@ function fmtCompact(n) {
  *     counted inside `input`.
  */
 export function extractUsage(text) {
-  const first = /"(?:input_tokens|prompt_tokens)"\s*:\s*(\d+)/.exec(text);
-  const re = /"(?:output_tokens|completion_tokens)"\s*:\s*(\d+)/g;
-  let last = null, m;
-  while ((m = re.exec(text))) last = m;
-  const cr = /"cache_read_input_tokens"\s*:\s*(\d+)/.exec(text) || /"cached_tokens"\s*:\s*(\d+)/.exec(text);
-  const cw = /"cache_creation_input_tokens"\s*:\s*(\d+)/.exec(text) || /"cache_write_tokens"\s*:\s*(\d+)/.exec(text);
-  const nanoAiu = /"total_nano_aiu"\s*:\s*(\d+)/.exec(text);
-  return {
-    input: first ? Number(first[1]) : null,
-    output: last ? Number(last[1]) : null,
-    cacheRead: cr ? Number(cr[1]) : null,
-    cacheWrite: cw ? Number(cw[1]) : null,
-    totalNanoAiu: nanoAiu ? Number(nanoAiu[1]) : null,
+  const fields = {
+    input_tokens: "input", prompt_tokens: "input",
+    output_tokens: "output", completion_tokens: "output",
+    cache_read_input_tokens: "cacheRead", cached_tokens: "cacheRead",
+    cache_creation_input_tokens: "cacheWrite", cache_write_tokens: "cacheWrite",
+    total_nano_aiu: "totalNanoAiu",
   };
+  const usage = { input: null, output: null, cacheRead: null, cacheWrite: null, totalNanoAiu: null };
+  // Require a JSON value terminator so a number split across chunks is not
+  // recorded prematurely (including as a false zero-dollar request).
+  const re = /"(input_tokens|prompt_tokens|output_tokens|completion_tokens|cache_read_input_tokens|cached_tokens|cache_creation_input_tokens|cache_write_tokens|total_nano_aiu)"\s*:\s*(\d+)(?=\s*[,}])/g;
+  for (const m of text.matchAll(re)) usage[fields[m[1]]] = Number(m[2]);
+  return usage;
+}
+
+// Inspect every chunk, not just the response's head/tail: Responses puts
+// copilot_usage before the terminal response object, which can repeat a large
+// prompt/output and push billing metadata out of both sampled ends.
+export function tapUsage(stream) {
+  const CAP = 8192;
+  let tail = "";
+  const usage = extractUsage("");
+  stream.on("data", (chunk) => {
+    const text = tail + chunk.toString("utf8");
+    const found = extractUsage(text);
+    for (const [key, value] of Object.entries(found)) {
+      if (value != null) usage[key] = value;
+    }
+    // Retain overlap for fields split across transport chunks, not entire SSE
+    // events (a terminal event can be much larger than the generated output).
+    tail = text.slice(-CAP);
+  });
+  return () => ({ ...usage });
 }
 
 /**
@@ -797,19 +816,6 @@ export function createShimServer(cfg, log = () => {}) {
       req: meta.req ?? null,
       traceId: meta.traceId ?? null,
     });
-  }
-
-  // Passively sample a response stream (without consuming it) to recover token
-  // usage for logging. Keeps a bounded head+tail so large bodies stay cheap.
-  function tapUsage(stream) {
-    const CAP = 8192;
-    let head = "", tail = "";
-    stream.on("data", (c) => {
-      const s = c.toString("utf8");
-      if (head.length < CAP) head += s.slice(0, CAP - head.length);
-      tail = (tail + s).slice(-CAP);
-    });
-    return () => extractUsage(head + "\n" + tail);
   }
 
   function fetchCopilotToken() {

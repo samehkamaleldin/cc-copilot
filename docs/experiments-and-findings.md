@@ -267,6 +267,11 @@ never persisted.
   - therefore `dollars = total_nano_aiu / 100,000,000,000`
   Human logs show both values, for example:
   `4.09 cr ($0.04) req`.
+  Streaming usage is captured incrementally with bounded overlap for split
+  fields. Sampling only the first/last 8 KB loses Responses billing metadata
+  when it precedes a large terminal response object, producing `$— req` and
+  undercounting session spend. Missing metadata remains unknown, not zero;
+  monthly spend still comes from the independent quota counter.
 - **Opt-in full body trace** → `logs/bodies/<ts>-<seq>-<kind>-<model>.json` when
   `CC_COPILOT_TRACE_BODIES=1` (captures the exact outgoing prompt incl.
   `prompt_cache_key`; off by default — prompts may be sensitive).

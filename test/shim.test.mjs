@@ -9,6 +9,7 @@ import { EventEmitter } from "node:events";
 import {
   resolveModel,
   extractUsage,
+  tapUsage,
   nanoAiuToCredits,
   nanoAiuToDollars,
   promptTokenCount,
@@ -45,6 +46,60 @@ test("nano-AIU converts exactly to AI credits and dollars", () => {
   assert.equal(nanoAiuToDollars(1_700_000), 0.000017);
   assert.equal(nanoAiuToCredits(5_040_000_000), 5.04);
   assert.equal(nanoAiuToDollars(5_040_000_000), 0.0504);
+});
+
+test("tapUsage retains billing metadata in the middle of a large Responses stream", () => {
+  const stream = new EventEmitter();
+  const getUsage = tapUsage(stream);
+  const event = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  const text = event("response.created", {
+    response: { instructions: "a".repeat(20_000), usage: null },
+  }) + event("response.completed", {
+    copilot_usage: { total_nano_aiu: 36_000_000 },
+    response: {
+      instructions: "a".repeat(20_000),
+      output: [{ text: "b".repeat(20_000) }],
+      usage: { input_tokens: 11, output_tokens: 5, input_tokens_details: { cached_tokens: 3, cache_write_tokens: 2 } },
+    },
+  });
+  assert.equal(extractUsage(text.slice(0, 8192) + text.slice(-8192)).totalNanoAiu, null);
+  for (let i = 0; i < text.length; i += 4096) stream.emit("data", Buffer.from(text.slice(i, i + 4096)));
+  stream.emit("end");
+  assert.deepEqual(getUsage(), { input: 11, output: 5, cacheRead: 3, cacheWrite: 2, totalNanoAiu: 36_000_000 });
+  assert.equal(nanoAiuToDollars(getUsage().totalNanoAiu).toFixed(6), "0.000360");
+
+  const singleChunk = new EventEmitter();
+  const getSingleChunkUsage = tapUsage(singleChunk);
+  singleChunk.emit("data", Buffer.from(text));
+  assert.deepEqual(getSingleChunkUsage(), getUsage());
+});
+
+test("tapUsage handles fields split at every byte without recording partial numbers", () => {
+  const stream = new EventEmitter();
+  const getUsage = tapUsage(stream);
+  for (const char of '{"copilot_usage":{"total_nano_aiu":36000000') {
+    stream.emit("data", Buffer.from(char));
+    assert.equal(getUsage().totalNanoAiu, null);
+  }
+  for (const char of '},"usage":{"input_tokens":11,"output_tokens":5}}') {
+    stream.emit("data", Buffer.from(char));
+  }
+  assert.deepEqual(getUsage(), { input: 11, output: 5, cacheRead: null, cacheWrite: null, totalNanoAiu: 36_000_000 });
+});
+
+test("tapUsage keeps native start usage and applies final counts, including zero cost", () => {
+  const stream = new EventEmitter();
+  const getUsage = tapUsage(stream);
+  stream.emit("data", Buffer.from('data: {"usage":{"input_tokens":12,"output_tokens":0,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}\n\n'));
+  stream.emit("data", Buffer.from("x".repeat(20_000)));
+  stream.emit("data", Buffer.from('data: {"usage":{"output_tokens":9},"copilot_usage":{"total_nano_aiu":0}}\n\n'));
+  assert.deepEqual(getUsage(), { input: 12, output: 9, cacheRead: 3, cacheWrite: 4, totalNanoAiu: 0 });
+});
+
+test("extractUsage uses final usage counts and leaves missing billing unknown", () => {
+  const text = 'data: {"usage":{"input_tokens":0,"output_tokens":0}}\n\n'
+    + 'data: {"usage":{"input_tokens":42,"output_tokens":7,"input_tokens_details":{"cached_tokens":20}}}\n\n';
+  assert.deepEqual(extractUsage(text), { input: 42, output: 7, cacheRead: 20, cacheWrite: null, totalNanoAiu: null });
 });
 
 test("promptTokenCount handles Anthropic and Responses usage semantics", () => {
