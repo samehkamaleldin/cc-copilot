@@ -47,6 +47,25 @@ export function usageStatePath() {
   return path.join(dataDir(), "usage.json");
 }
 
+/**
+ * Structured per-call telemetry sink (one JSON object per LLM call, JSONL).
+ * Captures model/route/latency/status, token + prompt-cache figures, per-call
+ * spend and lightweight request metadata. Disable with CC_COPILOT_TELEMETRY=0;
+ * relocate with CC_COPILOT_TELEMETRY_FILE.
+ */
+export function telemetryPath() {
+  return process.env.CC_COPILOT_TELEMETRY_FILE || path.join(logDir(), "telemetry.jsonl");
+}
+
+/**
+ * Directory for opt-in full request/response body traces (the actual prompts).
+ * Only written when CC_COPILOT_TRACE_BODIES is set (may contain sensitive
+ * prompt content — off by default).
+ */
+export function traceDir() {
+  return path.join(logDir(), "bodies");
+}
+
 /** Path to the npx executable, accounting for Windows. */
 export function npxCommand() {
   return process.platform === "win32" ? "npx.cmd" : "npx";

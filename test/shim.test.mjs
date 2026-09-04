@@ -8,7 +8,9 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
   resolveModel,
-  hoistSystemMessages,
+  normalizeSystemMessages,
+  sanitizeNativeMessagesBody,
+  ensureAutomaticCache,
   anthropicToResponses,
   responsesToAnthropic,
   streamResponsesToAnthropic,
@@ -74,23 +76,81 @@ test("resolveModel does not hang on a cyclic alias config", () => {
   assert.equal(resolveModel("x", { x: "x" }), "x");
 });
 
-/* --------------------------- hoistSystemMessages --------------------------- */
+/* ------------------------- normalizeSystemMessages ------------------------- */
 
-test("hoistSystemMessages moves system turns into the top-level field", () => {
+test("normalizeSystemMessages keeps trailing system content at the conversation tail", () => {
   const body = {
     system: "base",
     messages: [{ role: "user", content: "hi" }, { role: "system", content: "extra" }],
   };
-  hoistSystemMessages(body);
+  normalizeSystemMessages(body);
   assert.equal(body.messages.length, 1);
   assert.equal(body.messages.at(-1).role, "user", "must end on a user turn");
-  assert.equal(body.system, "base\n\nextra");
+  assert.equal(body.messages.at(-1).content, "hi\n\nextra");
+  assert.equal(body.system, "base");
 });
 
-test("hoistSystemMessages appends to an array-form system prompt", () => {
-  const body = { system: [{ type: "text", text: "base" }], messages: [{ role: "system", content: "extra" }] };
-  hoistSystemMessages(body);
-  assert.deepEqual(body.system, [{ type: "text", text: "base" }, { type: "text", text: "extra" }]);
+test("normalizeSystemMessages preserves array content and conversation order", () => {
+  const body = {
+    messages: [
+      { role: "user", content: [{ type: "text", text: "question" }] },
+      { role: "system", content: "reminder" },
+      { role: "assistant", content: "answer" },
+      { role: "system", content: "next reminder" },
+    ],
+  };
+  normalizeSystemMessages(body);
+  assert.deepEqual(body.messages, [
+    { role: "user", content: [{ type: "text", text: "question" }, { type: "text", text: "reminder" }] },
+    { role: "assistant", content: "answer" },
+    { role: "user", content: "next reminder" },
+  ]);
+});
+
+test("sanitizeNativeMessagesBody preserves supported and future fields", () => {
+  const body = {
+    model: "claude-opus-5",
+    cache_control: { type: "ephemeral" },
+    future_feature: { enabled: true },
+    context_management: { edits: [] },
+    output_config: { effort: "high" },
+  };
+
+  assert.deepEqual(sanitizeNativeMessagesBody(body), {
+    model: "claude-opus-5",
+    cache_control: { type: "ephemeral" },
+    future_feature: { enabled: true },
+  });
+});
+
+test("ensureAutomaticCache adds a rolling breakpoint when a slot is available", () => {
+  const body = {
+    system: [
+      { type: "text", text: "a", cache_control: { type: "ephemeral" } },
+      { type: "text", text: "b", cache_control: { type: "ephemeral" } },
+      { type: "text", text: "c", cache_control: { type: "ephemeral" } },
+    ],
+    messages: [{ role: "user", content: "hi" }],
+  };
+
+  ensureAutomaticCache(body);
+  assert.deepEqual(body.cache_control, { type: "ephemeral" });
+});
+
+test("ensureAutomaticCache preserves client policy and respects the four-breakpoint limit", () => {
+  const configured = { cache_control: { type: "ephemeral", ttl: "1h" } };
+  ensureAutomaticCache(configured);
+  assert.deepEqual(configured.cache_control, { type: "ephemeral", ttl: "1h" });
+
+  const full = {
+    system: Array.from({ length: 4 }, (_, i) => ({
+      type: "text",
+      text: String(i),
+      cache_control: { type: "ephemeral" },
+    })),
+  };
+  ensureAutomaticCache(full);
+  assert.equal(full.cache_control, undefined);
 });
 
 /* -------------------------- anthropicToResponses --------------------------- */
@@ -104,6 +164,29 @@ test("anthropicToResponses maps system, max_tokens and temperature", () => {
   assert.equal(out.max_output_tokens, 128);
   assert.equal(out.temperature, 0.5);
   assert.deepEqual(out.input, [{ role: "user", content: "hi" }]);
+});
+
+test("normalized system reminders do not change Responses instructions or cache routing", () => {
+  const makeBody = (reminder) => ({
+    system: "stable instructions",
+    messages: [
+      { role: "user", content: "first turn" },
+      { role: "assistant", content: "first answer" },
+      { role: "user", content: "next turn" },
+      { role: "system", content: reminder },
+    ],
+  });
+  const first = makeBody("reminder one");
+  const second = makeBody("reminder two");
+  normalizeSystemMessages(first);
+  normalizeSystemMessages(second);
+
+  const out1 = anthropicToResponses(first, "gpt-5.6-sol");
+  const out2 = anthropicToResponses(second, "gpt-5.6-sol");
+  assert.equal(out1.instructions, "stable instructions");
+  assert.equal(out2.instructions, "stable instructions");
+  assert.equal(out1.prompt_cache_key, out2.prompt_cache_key);
+  assert.equal(out1.input.at(-1).content, "next turn\n\nreminder one");
 });
 
 test("anthropicToResponses translates a full tool round-trip", () => {

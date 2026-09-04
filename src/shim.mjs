@@ -8,11 +8,11 @@
 //   other models   -> copilot-api /chat/completions  (fallback via the local copilot-api)
 //
 // Fixes applied on the way through:
-//   * trailing role:"system" messages are hoisted into the top-level system field
-//     (Copilot requires the messages array to end with a user turn)
+//   * role:"system" messages inside the conversation are folded into user turns
+//     at the same position (Copilot requires messages to use user/assistant roles)
 //   * the [1m] context suffix is stripped (Copilot wants the bare model id)
-//   * beta/extension fields Copilot rejects (e.g. context_management, output_config)
-//     are dropped on the native path
+//   * fields Copilot is known to reject (context_management, output_config)
+//     are dropped on the native path; all other fields pass through unchanged
 //   * reasoning effort (output_config.effort) is mapped to the Responses API
 //
 // Auth: the short-lived Copilot token is fetched from the local copilot-api's
@@ -20,25 +20,30 @@
 import http from "node:http";
 import https from "node:https";
 import fs from "node:fs";
-import { usageStatePath } from "./paths.mjs";
+import crypto from "node:crypto";
+import path from "node:path";
+import { usageStatePath, telemetryPath, traceDir, logDir } from "./paths.mjs";
 
 const COPILOT_HOST = "api.githubcopilot.com";
 const DISCOVERY_PREFIX = "anthropic-copilot-";
 
+// Identify as the GitHub Copilot CLI (integration id `copilot-developer-cli`)
+// instead of VS Code Chat (`vscode-chat`), so Copilot attributes/bills these
+// requests as CLI usage. This mirrors the exact minimal header set the real
+// Copilot CLI sends to api.githubcopilot.com for /v1/messages and /v1/responses
+// (verified from the CLI broker binary github.exe): only Authorization,
+// Content-Type, Accept, Copilot-Integration-Id and Editor-Version — no
+// Editor-Plugin-Version and no GitHubCopilotChat User-Agent.
 const COPILOT_HEADERS = {
   "Content-Type": "application/json",
-  "Editor-Version": "vscode/1.126.0",
-  "Editor-Plugin-Version": "copilot/1.256.0",
-  "Copilot-Integration-Id": "vscode-chat",
-  "User-Agent": "GitHubCopilotChat/0.26.0",
+  "Accept": "application/json",
+  "Editor-Version": "CopilotCLI/1.0",
+  "Copilot-Integration-Id": "copilot-developer-cli",
 };
 
-// Standard Anthropic Messages fields Copilot's /v1/messages accepts. Anything
-// else (beta extensions like context_management / output_config) is dropped.
-const ALLOWED_MESSAGES_FIELDS = new Set([
-  "model", "messages", "system", "max_tokens", "metadata", "stop_sequences",
-  "stream", "temperature", "thinking", "tool_choice", "tools", "top_k", "top_p",
-]);
+// Preserve request fields by default so newly supported Anthropic features are
+// not silently disabled. Remove only fields Copilot is known to reject.
+const UNSUPPORTED_NATIVE_FIELDS = new Set(["context_management", "output_config"]);
 
 // Reasoning efforts accepted by current Responses API models.
 const RESPONSES_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
@@ -76,13 +81,27 @@ function fmtCompact(n) {
  * Pull token usage out of a response body fragment. Handles both Anthropic
  * (input_tokens / output_tokens) and OpenAI (prompt_tokens / completion_tokens)
  * shapes, and streamed bodies where the final output count appears last.
+ *
+ * Also recovers prompt-cache figures so cache effectiveness is visible:
+ *   - Anthropic: cache_read_input_tokens (prefix served from cache, ~1/10th
+ *     price) and cache_creation_input_tokens (prefix written to cache). Here
+ *     `input` is the NON-cached portion, reported separately.
+ *   - OpenAI Responses: input_tokens_details.cached_tokens — a subset already
+ *     counted inside `input`.
  */
 export function extractUsage(text) {
   const first = /"(?:input_tokens|prompt_tokens)"\s*:\s*(\d+)/.exec(text);
   const re = /"(?:output_tokens|completion_tokens)"\s*:\s*(\d+)/g;
   let last = null, m;
   while ((m = re.exec(text))) last = m;
-  return { input: first ? Number(first[1]) : null, output: last ? Number(last[1]) : null };
+  const cr = /"cache_read_input_tokens"\s*:\s*(\d+)/.exec(text) || /"cached_tokens"\s*:\s*(\d+)/.exec(text);
+  const cw = /"cache_creation_input_tokens"\s*:\s*(\d+)/.exec(text);
+  return {
+    input: first ? Number(first[1]) : null,
+    output: last ? Number(last[1]) : null,
+    cacheRead: cr ? Number(cr[1]) : null,
+    cacheWrite: cw ? Number(cw[1]) : null,
+  };
 }
 
 /**
@@ -125,6 +144,14 @@ export function formatCallLine({ time, status, model, route, stream, ms, usage, 
   if (usage && (usage.input != null || usage.output != null)) {
     parts.push(paint("↑" + fmtCompact(usage.input ?? 0), C.blue) + " " + paint("↓" + fmtCompact(usage.output ?? 0), C.green));
   }
+  // Prompt-cache activity (⚡ read from cache / + written to cache). Makes it
+  // visible whether KV/prompt caching is actually hitting on either path.
+  if (usage && (usage.cacheRead || usage.cacheWrite)) {
+    const bits = [];
+    if (usage.cacheRead) bits.push("⚡" + fmtCompact(usage.cacheRead));
+    if (usage.cacheWrite) bits.push("+" + fmtCompact(usage.cacheWrite));
+    parts.push(paint(bits.join(" "), C.yellow));
+  }
   // Session tokens (Σ ↑ in / ↓ out).
   if (sessionTokens && (sessionTokens.input || sessionTokens.output)) {
     parts.push(paint("Σ ↑" + fmtCompact(sessionTokens.input), C.blue) + " " + paint("↓" + fmtCompact(sessionTokens.output), C.green));
@@ -143,6 +170,50 @@ function extractText(content) {
   if (Array.isArray(content))
     return content.map((c) => (typeof c === "string" ? c : c?.text ?? "")).filter(Boolean).join("\n");
   return "";
+}
+
+// Character length of an Anthropic `system` field (string or block array).
+function sysChars(system) {
+  if (!system) return 0;
+  if (typeof system === "string") return system.length;
+  if (Array.isArray(system)) return system.reduce((n, b) => n + ((typeof b === "string" ? b : b?.text) || "").length, 0);
+  return 0;
+}
+
+// Count cache_control breakpoints the client placed on system/message blocks —
+// i.e. how many prompt-cache markers were actually requested. Zero here means
+// the client never asked for caching (so cacheRead will always be 0).
+function countCacheControls(body) {
+  let n = body?.cache_control ? 1 : 0;
+  const scan = (blocks) => { if (Array.isArray(blocks)) for (const b of blocks) if (b && typeof b === "object" && b.cache_control) n++; };
+  scan(body?.system);
+  if (Array.isArray(body?.messages)) for (const m of body.messages) scan(m?.content);
+  return n;
+}
+
+// Keep a rolling cache point at the end of growing Claude conversations. Claude
+// Code currently sends three explicit breakpoints for stable prompt sections,
+// leaving one of Anthropic's four slots available for automatic caching.
+export function ensureAutomaticCache(body) {
+  if (body && !body.cache_control && countCacheControls(body) < 4) {
+    body.cache_control = { type: "ephemeral" };
+  }
+  return body;
+}
+
+// Lightweight, non-sensitive shape of an incoming request for telemetry
+// (sizes/counts, not prompt content).
+function describeRequest(body, requested) {
+  return {
+    requested: requested ?? null,
+    messages: Array.isArray(body?.messages) ? body.messages.length : 0,
+    tools: Array.isArray(body?.tools) ? body.tools.length : 0,
+    systemChars: sysChars(body?.system),
+    maxTokens: body?.max_tokens ?? null,
+    cacheBreakpoints: countCacheControls(body),
+    automaticCache: !!body?.cache_control,
+    effort: body?.output_config?.effort ?? null,
+  };
 }
 
 function mapEffort(effort, model) {
@@ -207,23 +278,35 @@ export function resolveModel(name, aliases = {}) {
   return n;
 }
 
-// Trailing role:"system" messages are hoisted into the top-level system field
-// (Copilot requires the messages array to end with a user turn). Mutates `body`.
-export function hoistSystemMessages(body) {
+// Claude Code can append synthetic role:"system" reminders inside messages,
+// which Copilot rejects. Keep them at their original point in the conversation
+// by folding them into a neighboring user turn. Moving them to top-level system
+// would mutate the prompt prefix on every request and invalidate rolling caches.
+export function normalizeSystemMessages(body) {
   if (!Array.isArray(body.messages)) return;
-  const systemTexts = [];
-  body.messages = body.messages.filter((m) => {
-    if (m?.role !== "system") return true;
+  const normalized = [];
+  for (const m of body.messages) {
+    if (m?.role !== "system") {
+      normalized.push(m);
+      continue;
+    }
     const t = extractText(m.content);
-    if (t) systemTexts.push(t);
-    return false;
-  });
-  if (!systemTexts.length) return;
-  const extra = systemTexts.join("\n\n");
-  if (body.system == null) body.system = extra;
-  else if (typeof body.system === "string") body.system += "\n\n" + extra;
-  else if (Array.isArray(body.system)) body.system.push({ type: "text", text: extra });
-  else body.system = extra;
+    if (!t) continue;
+    const previous = normalized.at(-1);
+    if (previous?.role === "user") {
+      if (typeof previous.content === "string") previous.content += "\n\n" + t;
+      else if (Array.isArray(previous.content)) previous.content.push({ type: "text", text: t });
+      else previous.content = t;
+    } else {
+      normalized.push({ role: "user", content: t });
+    }
+  }
+  body.messages = normalized;
+}
+
+export function sanitizeNativeMessagesBody(body) {
+  for (const field of UNSUPPORTED_NATIVE_FIELDS) delete body[field];
+  return body;
 }
 
 // ---- Anthropic Messages -> OpenAI Responses ----
@@ -289,6 +372,18 @@ export function anthropicToResponses(body, model) {
     const tc = mapToolChoice(body.tool_choice);
     if (tc != null) out.tool_choice = tc;
   }
+
+  // Stable prompt-cache routing key. Copilot's /v1/responses auto-caches long
+  // prefixes, but under load-balancing an identical prefix can land on a
+  // different backend and miss. Pinning a key derived from the stable prefix
+  // (instructions + tool schema + first turn) routes repeat requests in the
+  // same conversation to the same cache-warm backend, so the large context is
+  // served from cache instead of re-billed at full input price each turn.
+  const seed = (out.instructions || "") + "|" +
+    (tools ? JSON.stringify(tools) : "") + "|" +
+    JSON.stringify(input[0] ?? "");
+  out.prompt_cache_key = "ccph-" + crypto.createHash("sha256").update(seed).digest("hex").slice(0, 32);
+
   return out;
 }
 
@@ -510,12 +605,54 @@ export function createShimServer(cfg, log = () => {}) {
   }
   function recordUsage(model, usage) {
     const inp = Number(usage?.input ?? 0), out = Number(usage?.output ?? 0);
+    const cr = Number(usage?.cacheRead ?? 0), cw = Number(usage?.cacheWrite ?? 0);
     stats.totals.requests += 1;
     stats.totals.input += inp;
     stats.totals.output += out;
+    stats.totals.cacheRead = (stats.totals.cacheRead ?? 0) + cr;
+    stats.totals.cacheWrite = (stats.totals.cacheWrite ?? 0) + cw;
     const bm = (stats.byModel[model] ||= { requests: 0, input: 0, output: 0 });
     bm.requests += 1; bm.input += inp; bm.output += out;
+    bm.cacheRead = (bm.cacheRead ?? 0) + cr;
+    bm.cacheWrite = (bm.cacheWrite ?? 0) + cw;
     saveStatsSoon();
+  }
+
+  /* ---- structured per-call telemetry (JSONL) + optional body trace ---- */
+
+  // One JSON object per LLM call appended to logs/telemetry.jsonl. Unlike the
+  // human-readable shim.log line, this is machine-queryable (jq / duckdb /
+  // sqlite import) and carries the full token + cache + spend + request-shape
+  // metadata for each call. Best-effort; never blocks or throws into the hot path.
+  const TELEMETRY_ON = process.env.CC_COPILOT_TELEMETRY !== "0";
+  const TRACE_BODIES = !!process.env.CC_COPILOT_TRACE_BODIES;
+  let telemetryStream = null;
+  let callSeq = 0;
+  function telemetryWrite(row) {
+    if (!TELEMETRY_ON) return;
+    try {
+      if (!telemetryStream) {
+        fs.mkdirSync(logDir(), { recursive: true });
+        telemetryStream = fs.createWriteStream(telemetryPath(), { flags: "a" });
+        if (telemetryStream.on) telemetryStream.on("error", () => { telemetryStream = null; });
+      }
+      telemetryStream.write(JSON.stringify(row) + "\n");
+    } catch { /* best effort */ }
+  }
+  // Opt-in: dump the full outgoing prompt body (and a response summary) so the
+  // exact sent/received payload can be inspected. Off unless CC_COPILOT_TRACE_BODIES.
+  function traceBody(kind, model, bodyBuf, extra) {
+    if (!TRACE_BODIES) return null;
+    try {
+      const dir = traceDir();
+      fs.mkdirSync(dir, { recursive: true });
+      const id = `${Date.now()}-${String(++callSeq).padStart(5, "0")}`;
+      const file = path.join(dir, `${id}-${kind}-${String(model).replace(/[^\w.-]/g, "_")}.json`);
+      let sent = null;
+      try { sent = JSON.parse(bodyBuf.toString("utf8")); } catch { sent = bodyBuf.toString("utf8"); }
+      fs.writeFileSync(file, JSON.stringify({ id, kind, model, request: sent, ...extra }, null, 2));
+      return id;
+    } catch { return null; }
   }
 
   // Live Copilot credit quota, sampled from copilot-api /usage. credits_used is
@@ -530,6 +667,7 @@ export function createShimServer(cfg, log = () => {}) {
   let lastReqCredits = null;      // credits_used at the previous logged request
   let sessionRequests = 0;        // successful calls since this proxy started
   let sessionInput = 0, sessionOutput = 0; // tokens since this proxy started
+  let sessionCacheRead = 0, sessionCacheWrite = 0; // cache tokens since start
   const sessionStartAt = new Date().toISOString();
   function fetchUsage() {
     return new Promise((resolve, reject) => {
@@ -588,16 +726,43 @@ export function createShimServer(cfg, log = () => {}) {
       sessionRequests += 1;
       sessionInput += Number(meta.usage.input ?? 0);
       sessionOutput += Number(meta.usage.output ?? 0);
+      sessionCacheRead += Number(meta.usage.cacheRead ?? 0);
+      sessionCacheWrite += Number(meta.usage.cacheWrite ?? 0);
     } else if (!meta.error) {
       sessionRequests += 1;
     }
     await ensureQuota();
+    const money = meta.error ? null : currentMoney();
     log(formatCallLine({
       time: new Date().toTimeString().slice(0, 8),
       ...meta,
-      money: meta.error ? null : currentMoney(),
+      money,
       sessionTokens: { input: sessionInput, output: sessionOutput },
     }));
+    // Structured, machine-queryable per-call record.
+    const u = meta.usage || {};
+    const cin = Number(u.input ?? 0), cr = Number(u.cacheRead ?? 0), cw = Number(u.cacheWrite ?? 0);
+    // Anthropic reports `input` as the non-cached remainder (total = input +
+    // cacheRead); Responses reports cacheRead as a subset already inside input.
+    const promptTokens = meta.route === "responses" ? cin : cin + cr;
+    telemetryWrite({
+      ts: new Date().toISOString(),
+      model: meta.model,
+      route: meta.route ?? null,
+      stream: !!meta.stream,
+      status: meta.status ?? null,
+      ms: meta.ms ?? null,
+      input: u.input ?? null,
+      output: u.output ?? null,
+      cacheRead: u.cacheRead ?? null,
+      cacheWrite: u.cacheWrite ?? null,
+      promptTokens: promptTokens || null,
+      cacheHitPct: promptTokens > 0 ? Math.round((cr / promptTokens) * 100) : null,
+      reqDollars: money ? money.req : null,
+      error: meta.error ?? null,
+      req: meta.req ?? null,
+      traceId: meta.traceId ?? null,
+    });
   }
 
   // Passively sample a response stream (without consuming it) to recover token
@@ -648,21 +813,21 @@ export function createShimServer(cfg, log = () => {}) {
   }
 
   // ---- Route 1: Claude models -> Copilot /v1/messages (native) ----
-  async function handleClaudeNative(body, res) {
+  async function handleClaudeNative(body, res, reqMeta) {
     const startedAt = Date.now();
     const model = body.model, stream = !!body.stream;
     let token;
     try { token = await getCopilotToken(); }
     catch (e) {
-      logCall({ status: 502, model, route: "native", stream, ms: Date.now() - startedAt, error: "token: " + e.message });
+      logCall({ status: 502, model, route: "native", stream, ms: Date.now() - startedAt, error: "token: " + e.message, req: reqMeta });
       res.writeHead(502, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { type: "error", message: "Copilot token error: " + e.message } }));
     }
 
-    hoistSystemMessages(body);
-    for (const k of Object.keys(body)) if (!ALLOWED_MESSAGES_FIELDS.has(k)) delete body[k];
+    sanitizeNativeMessagesBody(body);
 
     const bodyBuf = Buffer.from(JSON.stringify(body), "utf8");
+    const traceId = traceBody("messages", model, bodyBuf);
     const upReq = https.request(
       {
         host: COPILOT_HOST, path: "/v1/messages", method: "POST",
@@ -676,12 +841,12 @@ export function createShimServer(cfg, log = () => {}) {
         upRes.pipe(res);
         upRes.on("end", () => logCall({
           status: upRes.statusCode, model, route: "native", stream,
-          ms: Date.now() - startedAt, usage: getUsage(),
+          ms: Date.now() - startedAt, usage: getUsage(), req: reqMeta, traceId,
         }));
       },
     );
     upReq.on("error", (e) => {
-      logCall({ status: 502, model, route: "native", stream, ms: Date.now() - startedAt, error: e.message });
+      logCall({ status: 502, model, route: "native", stream, ms: Date.now() - startedAt, error: e.message, req: reqMeta, traceId });
       if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { type: "error", message: "upstream error: " + e.message } }));
     });
@@ -689,17 +854,18 @@ export function createShimServer(cfg, log = () => {}) {
   }
 
   // ---- Route 2: Responses-API models -> Copilot /v1/responses ----
-  async function handleResponsesApiModel(body, res, model) {
+  async function handleResponsesApiModel(body, res, model, reqMeta) {
     const startedAt = Date.now();
     const stream = !!body.stream;
     let token;
     try { token = await getCopilotToken(); }
     catch (e) {
-      logCall({ status: 502, model, route: "responses", stream, ms: Date.now() - startedAt, error: "token: " + e.message });
+      logCall({ status: 502, model, route: "responses", stream, ms: Date.now() - startedAt, error: "token: " + e.message, req: reqMeta });
       res.writeHead(502, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { type: "error", message: "Copilot token error: " + e.message } }));
     }
     const bodyBuf = Buffer.from(JSON.stringify(anthropicToResponses(body, model)), "utf8");
+    const traceId = traceBody("responses", model, bodyBuf);
     const upReq = https.request(
       {
         host: COPILOT_HOST, path: "/v1/responses", method: "POST",
@@ -710,14 +876,14 @@ export function createShimServer(cfg, log = () => {}) {
         // request) before any streaming translation writes SSE headers.
         if (upRes.statusCode !== 200) {
           if (upRes.statusCode === 401) invalidateToken();
-          logCall({ status: upRes.statusCode, model, route: "responses", stream, ms: Date.now() - startedAt, error: "HTTP " + upRes.statusCode });
+          logCall({ status: upRes.statusCode, model, route: "responses", stream, ms: Date.now() - startedAt, error: "HTTP " + upRes.statusCode, req: reqMeta, traceId });
           return relayUpstreamError(upRes, res);
         }
         if (body.stream) {
           const getUsage = tapUsage(upRes);
           upRes.on("end", () => logCall({
             status: 200, model, route: "responses", stream: true,
-            ms: Date.now() - startedAt, usage: getUsage(),
+            ms: Date.now() - startedAt, usage: getUsage(), req: reqMeta, traceId,
           }));
           return streamResponsesToAnthropic(upRes, res, model);
         }
@@ -729,10 +895,15 @@ export function createShimServer(cfg, log = () => {}) {
             res.end(JSON.stringify(responsesToAnthropic(r, model)));
             logCall({
               status: 200, model, route: "responses", stream: false, ms: Date.now() - startedAt,
-              usage: { input: r.usage?.input_tokens ?? null, output: r.usage?.output_tokens ?? null },
+              usage: {
+                input: r.usage?.input_tokens ?? null,
+                output: r.usage?.output_tokens ?? null,
+                cacheRead: r.usage?.input_tokens_details?.cached_tokens ?? null,
+              },
+              req: reqMeta, traceId,
             });
           } catch (e) {
-            logCall({ status: 502, model, route: "responses", stream: false, ms: Date.now() - startedAt, error: "parse: " + e.message });
+            logCall({ status: 502, model, route: "responses", stream: false, ms: Date.now() - startedAt, error: "parse: " + e.message, req: reqMeta, traceId });
             res.writeHead(502, { "content-type": "application/json" });
             res.end(JSON.stringify({ error: { type: "error", message: "parse error: " + e.message } }));
           }
@@ -740,7 +911,7 @@ export function createShimServer(cfg, log = () => {}) {
       },
     );
     upReq.on("error", (e) => {
-      logCall({ status: 502, model, route: "responses", stream, ms: Date.now() - startedAt, error: e.message });
+      logCall({ status: 502, model, route: "responses", stream, ms: Date.now() - startedAt, error: e.message, req: reqMeta, traceId });
       if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { type: "error", message: "upstream error: " + e.message } }));
     });
@@ -825,6 +996,8 @@ export function createShimServer(cfg, log = () => {}) {
         dollars: money ? money.session : null,
         inputTokens: sessionInput,
         outputTokens: sessionOutput,
+        cacheReadTokens: sessionCacheRead,
+        cacheWriteTokens: sessionCacheWrite,
       },
       allTime: { since: stats.since, totals: stats.totals, byModel: stats.byModel },
       quotaFetchedAt: quotaCache.fetchedAt ? new Date(quotaCache.fetchedAt).toISOString() : null,
@@ -853,8 +1026,11 @@ export function createShimServer(cfg, log = () => {}) {
           body.model = resolveModel(body.model ?? "", aliases);
           if (effortOverride) body.output_config = { ...(body.output_config || {}), effort: effortOverride };
           const model = body.model;
-          if (responsesApiModels.has(model)) return handleResponsesApiModel(body, res, model);
-          if (/^claude-/i.test(model)) return handleClaudeNative(body, res);
+          normalizeSystemMessages(body);
+          if (/^claude-/i.test(model)) ensureAutomaticCache(body);
+          const reqMeta = describeRequest(body, requestedModel);
+          if (responsesApiModels.has(model)) return handleResponsesApiModel(body, res, model, reqMeta);
+          if (/^claude-/i.test(model)) return handleClaudeNative(body, res, reqMeta);
           outBuf = Buffer.from(JSON.stringify(body), "utf8");
           return forwardToCopilotApi(req, outBuf, res, { model, stream: !!body.stream });
         }

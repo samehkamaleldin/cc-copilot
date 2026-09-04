@@ -155,7 +155,16 @@ async function doCost() {
   out("");
   out("Tokens");
   out(`  This session  : ${fmtInt(sess.inputTokens)} in · ${fmtInt(sess.outputTokens)} out   (${fmtInt(sess.requests)} req)`);
+  const scr = sess.cacheReadTokens ?? 0, scw = sess.cacheWriteTokens ?? 0;
+  if (scr || scw) {
+    const hit = scr + Number(sess.inputTokens || 0) > 0 ? Math.round((scr / (scr + Number(sess.inputTokens || 0))) * 100) : 0;
+    out(`  Session cache : ${fmtInt(scr)} read · ${fmtInt(scw)} write   (~${hit}% of prompt served from cache)`);
+  }
   out(`  All-time      : ${fmtInt(all.input)} in · ${fmtInt(all.output)} out   (${fmtInt(all.requests)} req, since ${(s.allTime?.since || "?").slice(0, 10)})`);
+  if (all.cacheRead || all.cacheWrite) {
+    const hit = (all.cacheRead || 0) + Number(all.input || 0) > 0 ? Math.round(((all.cacheRead || 0) / ((all.cacheRead || 0) + Number(all.input || 0))) * 100) : 0;
+    out(`  All-time cache: ${fmtInt(all.cacheRead || 0)} read · ${fmtInt(all.cacheWrite || 0)} write   (~${hit}% cached)`);
+  }
   const byModel = s.allTime?.byModel || {};
   const models = Object.keys(byModel).sort((a, b) => byModel[b].requests - byModel[a].requests);
   if (models.length) {
