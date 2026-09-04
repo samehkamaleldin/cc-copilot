@@ -246,9 +246,14 @@ function describeRequest(body, requested) {
   };
 }
 
+// Responses models whose deployment accepts the "max" reasoning effort. Older
+// Responses models reject it, so "max" is downgraded to "xhigh" for anything
+// not listed here. gpt-5.6-* and gpt-6-* (e.g. gpt-6-astra) advertise "max".
+const MAX_EFFORT_MODELS = /^(gpt-5\.6-|gpt-6-)/;
+
 function mapEffort(effort, model) {
   if (!effort) return null;
-  if (effort === "max" && !model.startsWith("gpt-5.6-")) return "xhigh";
+  if (effort === "max" && !MAX_EFFORT_MODELS.test(model)) return "xhigh";
   return RESPONSES_EFFORTS.has(effort) ? effort : null;
 }
 

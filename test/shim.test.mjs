@@ -277,9 +277,10 @@ test("anthropicToResponses omits tool_choice when no tools are present", () => {
   assert.equal(out.tool_choice, undefined);
 });
 
-test("anthropicToResponses downgrades effort 'max' only for non-5.6 models", () => {
+test("anthropicToResponses keeps 'max' effort for gpt-5.6-*/gpt-6-*, downgrades it elsewhere", () => {
   const body = { messages: [{ role: "user", content: "hi" }], output_config: { effort: "max" } };
   assert.deepEqual(anthropicToResponses(body, "gpt-5.6-sol").reasoning, { effort: "max" });
+  assert.deepEqual(anthropicToResponses(body, "gpt-6-astra").reasoning, { effort: "max" });
   assert.deepEqual(anthropicToResponses(body, "gpt-5.5").reasoning, { effort: "xhigh" });
 });
 
