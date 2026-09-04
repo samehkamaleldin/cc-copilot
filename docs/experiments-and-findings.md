@@ -247,7 +247,8 @@ never persisted.
 
 - **Per-call JSONL telemetry** → `logs/telemetry.jsonl` (one JSON object per
   call). Fields: `ts, model, route, stream, status, ms, input, output,
-  cacheRead, cacheWrite, promptTokens, cacheHitPct, reqDollars, error, traceId`
+  cacheRead, cacheWrite, totalNanoAiu, aiCredits, promptTokens, cacheHitPct,
+  reqDollars, error, traceId`
   and a `req` shape object `{requested, messages, tools, systemChars, maxTokens,
   cacheBreakpoints, effort}`. On by default; `CC_COPILOT_TELEMETRY=0` disables;
   `CC_COPILOT_TELEMETRY_FILE` relocates.
@@ -258,6 +259,14 @@ never persisted.
     whether caching was even requested.
 - **Cache rates in `/stats` and `cc-copilot cost`** (session + all-time
   `cacheRead`/`cacheWrite` and a `~N% served from cache` line).
+- **Exact request cost** from Copilot's response-level
+  `copilot_usage.total_nano_aiu`, rather than trying to assign delayed quota
+  counter updates to individual calls:
+  - `1,000,000,000 nano-AIU = 1 AI credit`
+  - `100 AI credits = $1.00`
+  - therefore `dollars = total_nano_aiu / 100,000,000,000`
+  Human logs show both values, for example:
+  `4.09 cr ($0.04) req`.
 - **Opt-in full body trace** → `logs/bodies/<ts>-<seq>-<kind>-<model>.json` when
   `CC_COPILOT_TRACE_BODIES=1` (captures the exact outgoing prompt incl.
   `prompt_cache_key`; off by default — prompts may be sensitive).

@@ -8,6 +8,10 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
   resolveModel,
+  extractUsage,
+  nanoAiuToCredits,
+  nanoAiuToDollars,
+  promptTokenCount,
   normalizeSystemMessages,
   sanitizeNativeMessagesBody,
   ensureAutomaticCache,
@@ -16,6 +20,38 @@ import {
   streamResponsesToAnthropic,
   relayUpstreamError,
 } from "../src/shim.mjs";
+
+test("extractUsage captures exact Copilot nano-AIU cost metadata", () => {
+  const usage = extractUsage(JSON.stringify({
+    usage: {
+      input_tokens: 12,
+      output_tokens: 1,
+      cache_read_input_tokens: 3,
+      cache_creation_input_tokens: 4,
+    },
+    copilot_usage: { total_nano_aiu: 1_700_000 },
+  }));
+  assert.deepEqual(usage, {
+    input: 12,
+    output: 1,
+    cacheRead: 3,
+    cacheWrite: 4,
+    totalNanoAiu: 1_700_000,
+  });
+});
+
+test("nano-AIU converts exactly to AI credits and dollars", () => {
+  assert.equal(nanoAiuToCredits(1_700_000), 0.0017);
+  assert.equal(nanoAiuToDollars(1_700_000), 0.000017);
+  assert.equal(nanoAiuToCredits(5_040_000_000), 5.04);
+  assert.equal(nanoAiuToDollars(5_040_000_000), 0.0504);
+});
+
+test("promptTokenCount handles Anthropic and Responses usage semantics", () => {
+  const usage = { input: 2, cacheRead: 108_000, cacheWrite: 1_000 };
+  assert.equal(promptTokenCount(usage, "native"), 109_002);
+  assert.equal(promptTokenCount(usage, "responses"), 2);
+});
 
 /** Minimal ServerResponse stand-in that records what was written. */
 function fakeRes() {

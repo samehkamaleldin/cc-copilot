@@ -147,7 +147,9 @@ async function doCost() {
     out(`  This month    : ${money(m.monthly)} used` +
         (m.remaining != null ? `   (${money(m.remaining)} left${m.entitlement != null ? ` of ${money(m.entitlement)}` : ""}${q?.percentRemaining != null ? `, ${q.percentRemaining}%` : ""}, resets ${q?.resetDate ?? "?"})` : ""));
     const avg = sess.requests && m.session != null ? m.session / sess.requests : null;
-    out(`  This session  : ${money(m.session)}   (${fmtInt(sess.requests)} requests${avg != null ? `, avg ${money(avg)}/req` : ""})`);
+    const credits = sess.aiCredits ?? m.sessionCredits;
+    out(`  This session  : ${money(m.session)}${credits != null ? ` (${Number(credits).toLocaleString("en-US", { maximumFractionDigits: 2 })} AI credits)` : ""}` +
+        `   (${fmtInt(sess.requests)} requests${avg != null ? `, avg ${money(avg)}/req` : ""})`);
     if (q && q.plan) out(`  Plan          : ${q.plan}`);
   } else {
     out("  (no premium-interaction credit quota reported by Copilot)");
@@ -157,7 +159,7 @@ async function doCost() {
   out(`  This session  : ${fmtInt(sess.inputTokens)} in · ${fmtInt(sess.outputTokens)} out   (${fmtInt(sess.requests)} req)`);
   const scr = sess.cacheReadTokens ?? 0, scw = sess.cacheWriteTokens ?? 0;
   if (scr || scw) {
-    const hit = scr + Number(sess.inputTokens || 0) > 0 ? Math.round((scr / (scr + Number(sess.inputTokens || 0))) * 100) : 0;
+    const hit = Number(sess.inputTokens || 0) > 0 ? Math.round((scr / Number(sess.inputTokens)) * 100) : 0;
     out(`  Session cache : ${fmtInt(scr)} read · ${fmtInt(scw)} write   (~${hit}% of prompt served from cache)`);
   }
   out(`  All-time      : ${fmtInt(all.input)} in · ${fmtInt(all.output)} out   (${fmtInt(all.requests)} req, since ${(s.allTime?.since || "?").slice(0, 10)})`);

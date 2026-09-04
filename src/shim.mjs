@@ -67,7 +67,29 @@ function latColor(ms) { return ms < 2000 ? C.green : ms < 10000 ? C.yellow : C.r
 // Copilot premium-interaction credits per US dollar (100 credits = $1.00).
 // Override with CC_COPILOT_CREDITS_PER_DOLLAR if your plan's rate differs.
 export const CREDITS_PER_DOLLAR = Number(process.env.CC_COPILOT_CREDITS_PER_DOLLAR) || 100;
-function fmtMoney(d) { return d == null ? "$—" : "$" + Number(d).toFixed(2); }
+export const NANO_AIU_PER_CREDIT = 1_000_000_000;
+export function nanoAiuToCredits(n) { return n == null ? null : Number(n) / NANO_AIU_PER_CREDIT; }
+export function nanoAiuToDollars(n) {
+  const credits = nanoAiuToCredits(n);
+  return credits == null ? null : credits / CREDITS_PER_DOLLAR;
+}
+export function promptTokenCount(usage, route) {
+  const input = Number(usage?.input ?? 0);
+  if (route === "responses") return input;
+  return input + Number(usage?.cacheRead ?? 0) + Number(usage?.cacheWrite ?? 0);
+}
+function fmtMoney(d) {
+  if (d == null) return "$—";
+  const n = Number(d);
+  const digits = n > 0 && n < 0.001 ? 6 : n > 0 && n < 0.01 ? 4 : 2;
+  return "$" + n.toFixed(digits);
+}
+function fmtCredits(c) {
+  if (c == null) return "— cr";
+  const n = Number(c);
+  const digits = n > 0 && n < 0.01 ? 4 : n < 1 ? 2 : 2;
+  return n.toFixed(digits) + " cr";
+}
 
 /** Compact token counts: 812 -> "812", 12_300 -> "12.3k", 3_400_000 -> "3.40M". */
 function fmtCompact(n) {
@@ -95,12 +117,14 @@ export function extractUsage(text) {
   let last = null, m;
   while ((m = re.exec(text))) last = m;
   const cr = /"cache_read_input_tokens"\s*:\s*(\d+)/.exec(text) || /"cached_tokens"\s*:\s*(\d+)/.exec(text);
-  const cw = /"cache_creation_input_tokens"\s*:\s*(\d+)/.exec(text);
+  const cw = /"cache_creation_input_tokens"\s*:\s*(\d+)/.exec(text) || /"cache_write_tokens"\s*:\s*(\d+)/.exec(text);
+  const nanoAiu = /"total_nano_aiu"\s*:\s*(\d+)/.exec(text);
   return {
     input: first ? Number(first[1]) : null,
     output: last ? Number(last[1]) : null,
     cacheRead: cr ? Number(cr[1]) : null,
     cacheWrite: cw ? Number(cw[1]) : null,
+    totalNanoAiu: nanoAiu ? Number(nanoAiu[1]) : null,
   };
 }
 
@@ -140,9 +164,11 @@ export function formatCallLine({ time, status, model, route, stream, ms, usage, 
   if (stream) parts.push(paint("stream", C.dim));
   if (ms != null) parts.push(paint(ms + "ms", latColor(ms)));
   if (error) { parts.push(paint(error, C.red)); return parts.join(SEP); }
-  // Request tokens (↑ in / ↓ out).
+  // Total request prompt (↑) and generated output (↓). Anthropic reports
+  // input_tokens as only the remainder outside cache reads/writes, so showing
+  // that raw value alone would make a 100K-token prompt look like "↑2".
   if (usage && (usage.input != null || usage.output != null)) {
-    parts.push(paint("↑" + fmtCompact(usage.input ?? 0), C.blue) + " " + paint("↓" + fmtCompact(usage.output ?? 0), C.green));
+    parts.push(paint("↑" + fmtCompact(promptTokenCount(usage, route)), C.blue) + " " + paint("↓" + fmtCompact(usage.output ?? 0), C.green));
   }
   // Prompt-cache activity (⚡ read from cache / + written to cache). Makes it
   // visible whether KV/prompt caching is actually hitting on either path.
@@ -156,9 +182,13 @@ export function formatCallLine({ time, status, model, route, stream, ms, usage, 
   if (sessionTokens && (sessionTokens.input || sessionTokens.output)) {
     parts.push(paint("Σ ↑" + fmtCompact(sessionTokens.input), C.blue) + " " + paint("↓" + fmtCompact(sessionTokens.output), C.green));
   }
-  // Money: this request · this session · this month (US$).
+  // Exact request/session AI credits from response metadata; monthly quota is
+  // the authoritative server-side counter.
   if (money) {
-    parts.push(paint(fmtMoney(money.req) + " req", C.green, C.bold));
+    const req = money.reqCredits != null
+      ? `${fmtCredits(money.reqCredits)} (${fmtMoney(money.req)}) req`
+      : `${fmtMoney(money.req)} req`;
+    parts.push(paint(req, C.green, C.bold));
     parts.push(paint(fmtMoney(money.session) + " ses", C.cyan));
     parts.push(paint(fmtMoney(money.monthly) + " mo", C.yellow));
   }
@@ -603,18 +633,24 @@ export function createShimServer(cfg, log = () => {}) {
     }, 1000);
     if (saveTimer.unref) saveTimer.unref();
   }
-  function recordUsage(model, usage) {
+  function recordUsage(model, usage, route) {
     const inp = Number(usage?.input ?? 0), out = Number(usage?.output ?? 0);
     const cr = Number(usage?.cacheRead ?? 0), cw = Number(usage?.cacheWrite ?? 0);
+    const nanoAiu = Number(usage?.totalNanoAiu ?? 0);
+    const prompt = promptTokenCount(usage, route);
     stats.totals.requests += 1;
     stats.totals.input += inp;
+    stats.totals.promptInput = (stats.totals.promptInput ?? 0) + prompt;
     stats.totals.output += out;
     stats.totals.cacheRead = (stats.totals.cacheRead ?? 0) + cr;
     stats.totals.cacheWrite = (stats.totals.cacheWrite ?? 0) + cw;
+    stats.totals.totalNanoAiu = (stats.totals.totalNanoAiu ?? 0) + nanoAiu;
     const bm = (stats.byModel[model] ||= { requests: 0, input: 0, output: 0 });
     bm.requests += 1; bm.input += inp; bm.output += out;
+    bm.promptInput = (bm.promptInput ?? 0) + prompt;
     bm.cacheRead = (bm.cacheRead ?? 0) + cr;
     bm.cacheWrite = (bm.cacheWrite ?? 0) + cw;
+    bm.totalNanoAiu = (bm.totalNanoAiu ?? 0) + nanoAiu;
     saveStatsSoon();
   }
 
@@ -663,11 +699,10 @@ export function createShimServer(cfg, log = () => {}) {
   const QUOTA_TTL_MS = 2_000;
   let quotaCache = { snapshot: null, fetchedAt: 0 };
   let quotaInflight = null;
-  let sessionStartCredits = null; // credits_used when this proxy process started
-  let lastReqCredits = null;      // credits_used at the previous logged request
   let sessionRequests = 0;        // successful calls since this proxy started
   let sessionInput = 0, sessionOutput = 0; // tokens since this proxy started
   let sessionCacheRead = 0, sessionCacheWrite = 0; // cache tokens since start
+  let sessionNanoAiu = 0;         // exact sum returned by Copilot per response
   const sessionStartAt = new Date().toISOString();
   function fetchUsage() {
     return new Promise((resolve, reject) => {
@@ -688,33 +723,26 @@ export function createShimServer(cfg, log = () => {}) {
     quotaInflight = fetchUsage()
       .then((u) => {
         quotaCache = { snapshot: u, fetchedAt: Date.now() };
-        const q = summarizeQuota(u);
-        if (q && q.used != null && sessionStartCredits == null) {
-          sessionStartCredits = q.used;
-          lastReqCredits = q.used;
-        }
       })
       .catch(() => { /* keep last known */ })
       .finally(() => { quotaInflight = null; });
     return quotaInflight;
   }
-  // Capture the session baseline up front so per-session spend starts at $0.00.
   ensureQuota();
 
-  // Convert the current quota snapshot into per-request / per-session / monthly
-  // dollar figures. Per-request is the credit delta since the last logged call
-  // (credits update server-side with slight lag, so a call's cost may land on a
-  // subsequent line; the session and monthly totals stay authoritative).
-  function currentMoney() {
+  // Copilot returns exact per-call cost as total_nano_aiu:
+  // 1e9 nano-AIU = 1 AI credit = $0.01. Use that for request/session figures;
+  // retain the asynchronously updated quota only for the authoritative month.
+  function currentMoney(usage) {
     const q = summarizeQuota(quotaCache.snapshot);
-    if (!q || q.used == null) return null;
-    if (sessionStartCredits == null) { sessionStartCredits = q.used; lastReqCredits = q.used; }
-    const reqDelta = Math.max(0, q.used - (lastReqCredits ?? q.used));
-    lastReqCredits = q.used;
+    const reqNanoAiu = usage?.totalNanoAiu;
+    if (reqNanoAiu == null && (!q || q.used == null)) return null;
     return {
-      req: reqDelta / CREDITS_PER_DOLLAR,
-      session: (q.used - sessionStartCredits) / CREDITS_PER_DOLLAR,
-      monthly: q.used / CREDITS_PER_DOLLAR,
+      reqCredits: nanoAiuToCredits(reqNanoAiu),
+      req: nanoAiuToDollars(reqNanoAiu),
+      sessionCredits: nanoAiuToCredits(sessionNanoAiu),
+      session: nanoAiuToDollars(sessionNanoAiu),
+      monthly: q?.used != null ? q.used / CREDITS_PER_DOLLAR : null,
     };
   }
 
@@ -722,17 +750,18 @@ export function createShimServer(cfg, log = () => {}) {
   // request's token usage (recorded for /stats) and the live dollar spend.
   async function logCall(meta) {
     if (meta.usage && !meta.error) {
-      recordUsage(meta.model, meta.usage);
+      recordUsage(meta.model, meta.usage, meta.route);
       sessionRequests += 1;
-      sessionInput += Number(meta.usage.input ?? 0);
+      sessionInput += promptTokenCount(meta.usage, meta.route);
       sessionOutput += Number(meta.usage.output ?? 0);
       sessionCacheRead += Number(meta.usage.cacheRead ?? 0);
       sessionCacheWrite += Number(meta.usage.cacheWrite ?? 0);
+      sessionNanoAiu += Number(meta.usage.totalNanoAiu ?? 0);
     } else if (!meta.error) {
       sessionRequests += 1;
     }
     await ensureQuota();
-    const money = meta.error ? null : currentMoney();
+    const money = meta.error ? null : currentMoney(meta.usage);
     log(formatCallLine({
       time: new Date().toTimeString().slice(0, 8),
       ...meta,
@@ -741,10 +770,8 @@ export function createShimServer(cfg, log = () => {}) {
     }));
     // Structured, machine-queryable per-call record.
     const u = meta.usage || {};
-    const cin = Number(u.input ?? 0), cr = Number(u.cacheRead ?? 0), cw = Number(u.cacheWrite ?? 0);
-    // Anthropic reports `input` as the non-cached remainder (total = input +
-    // cacheRead); Responses reports cacheRead as a subset already inside input.
-    const promptTokens = meta.route === "responses" ? cin : cin + cr;
+    const cr = Number(u.cacheRead ?? 0);
+    const promptTokens = promptTokenCount(u, meta.route);
     telemetryWrite({
       ts: new Date().toISOString(),
       model: meta.model,
@@ -756,6 +783,8 @@ export function createShimServer(cfg, log = () => {}) {
       output: u.output ?? null,
       cacheRead: u.cacheRead ?? null,
       cacheWrite: u.cacheWrite ?? null,
+      totalNanoAiu: u.totalNanoAiu ?? null,
+      aiCredits: nanoAiuToCredits(u.totalNanoAiu),
       promptTokens: promptTokens || null,
       cacheHitPct: promptTokens > 0 ? Math.round((cr / promptTokens) * 100) : null,
       reqDollars: money ? money.req : null,
@@ -899,6 +928,8 @@ export function createShimServer(cfg, log = () => {}) {
                 input: r.usage?.input_tokens ?? null,
                 output: r.usage?.output_tokens ?? null,
                 cacheRead: r.usage?.input_tokens_details?.cached_tokens ?? null,
+                cacheWrite: r.usage?.input_tokens_details?.cache_write_tokens ?? null,
+                totalNanoAiu: r.copilot_usage?.total_nano_aiu ?? null,
               },
               req: reqMeta, traceId,
             });
@@ -982,7 +1013,8 @@ export function createShimServer(cfg, log = () => {}) {
     const money = q && q.used != null ? {
       creditsPerDollar: CREDITS_PER_DOLLAR,
       monthly: q.used / CREDITS_PER_DOLLAR,
-      session: sessionStartCredits != null ? (q.used - sessionStartCredits) / CREDITS_PER_DOLLAR : null,
+      sessionCredits: nanoAiuToCredits(sessionNanoAiu),
+      session: nanoAiuToDollars(sessionNanoAiu),
       remaining: q.remaining != null ? q.remaining / CREDITS_PER_DOLLAR : null,
       entitlement: q.entitlement != null ? q.entitlement / CREDITS_PER_DOLLAR : null,
     } : null;
@@ -994,6 +1026,7 @@ export function createShimServer(cfg, log = () => {}) {
         since: sessionStartAt,
         requests: sessionRequests,
         dollars: money ? money.session : null,
+        aiCredits: nanoAiuToCredits(sessionNanoAiu),
         inputTokens: sessionInput,
         outputTokens: sessionOutput,
         cacheReadTokens: sessionCacheRead,
