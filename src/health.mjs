@@ -94,11 +94,17 @@ export function checkModels(configured, upstream) {
 export function configuredModelIds(cfg) {
   const ids = new Set();
   const strip = (v) => String(v ?? "").replace(/\[1m\]$/i, "");
-  for (const value of Object.values(cfg.aliases ?? {})) {
-    // Alias values may chain to another alias (e.g. fable -> gpt-56-sol-ultra).
-    const direct = strip(value);
-    ids.add(strip(cfg.aliases?.[direct] ?? direct));
-  }
-  if (cfg.customModelOption?.id) ids.add(strip(cfg.customModelOption.id));
+  const resolve = (value) => {
+    let current = strip(value);
+    const seen = new Set();
+    while (cfg.aliases?.[current] && !seen.has(current)) {
+      seen.add(current);
+      current = strip(cfg.aliases[current]);
+    }
+    return current;
+  };
+  for (const value of Object.values(cfg.aliases ?? {})) ids.add(resolve(value));
+  if (cfg.customModelOption?.id) ids.add(resolve(cfg.customModelOption.id));
+  if (cfg.defaultModel) ids.add(resolve(cfg.defaultModel));
   return [...ids];
 }

@@ -106,8 +106,8 @@ whole reason the shim has three routes.
 | Model family            | Works on                         | Notes |
 | ----------------------- | -------------------------------- | ----- |
 | `claude-*`              | `/v1/messages` **and** `/chat/completions` | Native Anthropic format on `/v1/messages` — preferred (no translation). |
-| `gpt-5.5`               | `/v1/responses` **only**         | `model is not accessible via the /chat/completions endpoint`. OpenAI Responses API. Cut targets: this is the only GPT in the default set. |
-| `gpt-5.4-mini`, `gpt-5.3-codex` | `/v1/responses` **only**  | Same "not accessible via /chat/completions" error as `gpt-5.5`. Not in the default set. |
+| `gpt-6-astra`, `gpt-5.6-*`, `gpt-5.5` | `/v1/responses` **only** | `model is not accessible via the /chat/completions endpoint`. OpenAI Responses API. |
+| `gpt-5.4-mini`, `gpt-5.3-codex` | `/v1/responses` **only**  | Same "not accessible via /chat/completions" error. Not in the default set. |
 | `gpt-5.4`               | `/chat/completions` (rejects `max_tokens`) | Accessible on `/chat/completions` but errors `Use 'max_completion_tokens' instead`. Not in the default set; would need a param rename to use via the fallback path. |
 | `gpt-4.1`, `gpt-4o`, `gpt-5-mini`, `gpt-4o-mini` | `/chat/completions` | Verified callable. Not in the default set. |
 | `text-embedding-*`, `trajectory-compaction`, `*-picker` | special / non-chat | excluded from discovery. |
@@ -133,9 +133,8 @@ Observed: `gpt-5.4` on `/chat/completions` returns
 The shim's fallback path forwards `max_tokens` unchanged, so `gpt-5.4` is **not**
 usable via the fallback as-is — you'd need to rename the field for that model, or
 route it through the Responses API instead. (Untested whether `gpt-5.4` is served
-on `/v1/responses`.) `gpt-5.5` — the model cc-copilot actually uses — is on
-`/v1/responses`, where the field is `max_output_tokens`, so this doesn't apply to
-the default set.
+on `/v1/responses`.) The configured GPT models use `/v1/responses`, where the
+field is `max_output_tokens`, so this does not apply to them.
 
 ---
 
@@ -238,8 +237,8 @@ format**, so the shim needs no changes.
 ### 6.1 Effort travels in `output_config.effort`
 Claude Code sends the effort level (`/effort low|medium|high|xhigh|max`) as
 `output_config.effort`. For **Responses** models the shim maps it to
-`reasoning.effort`, clamping `max → xhigh` (the Responses API ceiling for
-gpt-5.5: `none|low|medium|high|xhigh`).
+`reasoning.effort`. GPT-5.6 and GPT-6 Astra accept `max`; models with a lower
+ceiling, including GPT-5.5, are clamped from `max` to `xhigh`.
 
 ### 6.2 Claude models don't get the effort level forwarded
 `output_config` is in the §1.3 whitelist-drop, so on the native Claude path the

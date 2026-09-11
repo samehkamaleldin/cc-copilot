@@ -23,33 +23,39 @@ User config is merged over the bundled defaults. After editing, run
   // Dashed ids (claude-opus-4-8) make Claude Code label them correctly.
   // The [1m] suffix asks Claude Code to budget the 1M window; the shim strips it.
   "aliases": {
-    "opus":   "claude-opus-5[1m]",
+    "opus":   "claude-opus-4-8[1m]",
     "sonnet": "claude-sonnet-5[1m]",
     "haiku":  "claude-haiku-4-5",
-    "fable":  "gpt-5.6-sol[1m]",
-    "gpt-56-sol":   "gpt-5.6-sol",
-    "gpt-56-luna":  "gpt-5.6-luna",
-    "gpt-56-terra": "gpt-5.6-terra"
+    "fable":  "gpt-6-astra[1m]",
+    "gpt-56-sol":       "gpt-5.6-sol",
+    "gpt-56-sol-ultra": "gpt-5.6-sol",
+    "gpt-56-luna":      "gpt-5.6-luna",
+    "gpt-56-terra":     "gpt-5.6-terra"
   },
 
-  // Written to Claude Code's `model` setting (alias or full id).
-  "defaultModel": "opus",
+  // Virtual aliases that force a Responses API reasoning effort.
+  "reasoningEffortOverrides": {
+    "gpt-56-sol-ultra": "max"
+  },
+
+  // Written directly to Claude Code's `model` setting.
+  "defaultModel": "gpt-56-sol-ultra[1m]",
 
   // Models that ONLY work on Copilot's /v1/responses endpoint.
-  "responsesApiModels": ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"],
+  "responsesApiModels": ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra"],
 
   // Optional display name/description for a repurposed tier row in the /model
   // picker (emits ANTHROPIC_DEFAULT_<TIER>_MODEL_NAME/_DESCRIPTION).
   "tierLabels": {
-    "fable": { "name": "GPT-5.6 Sol (1M)", "description": "GPT-5.6 Sol via GitHub Copilot — 1M context" }
+    "fable": { "name": "GPT-6 Astra", "description": "GPT-6 Astra via GitHub Copilot - 1M context" }
   },
 
   // One extra /model picker row (Foundry supports a single custom option).
   // Emits ANTHROPIC_CUSTOM_MODEL_OPTION[_NAME|_DESCRIPTION].
   "customModelOption": {
-    "id": "gpt-5.6-luna[1m]",
-    "name": "GPT-5.6 Luna (1M)",
-    "description": "GPT-5.6 Luna via GitHub Copilot — 1M context"
+    "id": "gpt-56-sol-ultra[1m]",
+    "name": "GPT-5.6 Sol Ultra (1M)",
+    "description": "GPT-5.6 Sol via GitHub Copilot - max reasoning, 1M context"
   },
 
   // Curated /v1/models discovery list (only used in gateway mode).
@@ -57,7 +63,7 @@ User config is merged over the bundled defaults. After editing, run
   // Claude Code recognises; non-claude ids get a synthetic prefix so discovery
   // keeps them.
   "discovery": [
-    { "id": "claude-opus-5",   "canonical": "claude-opus-5",    "name": "Claude Opus 5" },
+    { "id": "gpt-6-astra",       "canonical": "gpt-6-astra",       "name": "GPT-6 Astra" },
     { "id": "claude-opus-4.8",  "canonical": "claude-opus-4-8",  "name": "Claude Opus 4.8" },
     { "id": "claude-sonnet-5",  "canonical": "claude-sonnet-5",  "name": "Claude Sonnet 5" },
     { "id": "claude-haiku-4.5", "canonical": "claude-haiku-4-5", "name": "Claude Haiku 4.5" },
@@ -78,24 +84,25 @@ User config is merged over the bundled defaults. After editing, run
   "CLAUDE_CODE_USE_FOUNDRY": "1",
   "ANTHROPIC_FOUNDRY_BASE_URL": "http://localhost:4142",
   "ANTHROPIC_FOUNDRY_API_KEY": "cc-copilot",
-  "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5[1m]",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8[1m]",
   "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5[1m]",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5",
-  "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-5.6-sol[1m]",
-  "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "GPT-5.6 Sol (1M)",
-  "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "GPT-5.6 Sol via GitHub Copilot — 1M context",
-  "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-5.6-luna[1m]",
-  "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-5.6 Luna (1M)",
-  "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "GPT-5.6 Luna via GitHub Copilot — 1M context"
+  "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-6-astra[1m]",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "GPT-6 Astra",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "GPT-6 Astra via GitHub Copilot - 1M context",
+  "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-56-sol-ultra[1m]",
+  "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-5.6 Sol Ultra (1M)",
+  "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "GPT-5.6 Sol via GitHub Copilot - max reasoning, 1M context"
 }
 ```
 
 So in Claude Code:
-- `/model opus` → `claude-opus-5[1m]`
+- `/model opus` → `claude-opus-4-8[1m]`
 - `/model sonnet` → `claude-sonnet-5[1m]`
 - `/model haiku` → `claude-haiku-4-5`
-- `/model fable` → `gpt-5.6-sol[1m]` (shows as **GPT-5.6 Sol (1M)**)
-- **GPT-5.6 Luna (1M)** custom row → `gpt-5.6-luna[1m]`
+- `/model fable` → `gpt-6-astra[1m]` (shows as **GPT-6 Astra**)
+- **GPT-5.6 Sol Ultra (1M)** custom row → `gpt-56-sol-ultra[1m]`
+- New sessions default directly to `gpt-56-sol-ultra[1m]`
 
 You can also select a model by full id, e.g. `/model claude-opus-4-8`, or type
 any GPT-5.6 alias directly: `/model gpt-56-terra` (200K) or
@@ -139,7 +146,8 @@ Not every listed model is usable: some are blocked on `/chat/completions`
 
 ## Reasoning effort
 
-For Responses-API models (e.g. GPT‑5.5), Claude Code's effort level
-(`/effort low|medium|high|xhigh|max`) is forwarded as `reasoning.effort`
-(`max` maps to `xhigh`, the Responses API ceiling). Claude models use their
-native adaptive thinking.
+For Responses-API models, Claude Code's effort level
+(`/effort low|medium|high|xhigh|max`) is forwarded as `reasoning.effort`.
+GPT-5.6 and GPT-6 Astra support `max`; models with a lower ceiling are clamped
+to `xhigh`. The Sol Ultra alias forces `max`. Claude models use their native
+adaptive thinking.

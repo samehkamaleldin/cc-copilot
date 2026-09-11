@@ -4,7 +4,7 @@ cc-copilot sits between Claude Code and GitHub Copilot's model API.
 
 ```
 Claude Code ──Anthropic Messages──▶ shim (:4142) ──┬─▶ Copilot /v1/messages   (Claude models, native)
-                                                    ├─▶ Copilot /v1/responses  (gpt-5.5, translated)
+                                                    ├─▶ Copilot /v1/responses  (GPT-6 / GPT-5.6, translated)
                                                     └─▶ copilot-api (:4141) ─▶ /chat/completions (fallback)
                                                             │
                                                             └─ GitHub device auth + Copilot token refresh
@@ -29,7 +29,7 @@ request:
 | Incoming model            | Route                              | Why |
 | ------------------------- | ---------------------------------- | --- |
 | `claude-*`                | Copilot `POST /v1/messages`        | Copilot serves Claude natively in Anthropic format — zero translation, preserves thinking/effort/1M context. |
-| `gpt-5.5` (responses set) | Copilot `POST /v1/responses`       | GPT‑5.5 is only available on the OpenAI Responses API. The shim translates Anthropic ⇄ Responses, including tool calls (function calling) and SSE streaming. |
+| configured GPT Responses models | Copilot `POST /v1/responses`       | GPT-6 Astra and GPT-5.6 are only available on the OpenAI Responses API. The shim translates Anthropic ⇄ Responses, including tool calls (function calling) and SSE streaming. |
 | anything else             | `copilot-api /chat/completions`    | Fallback for other OpenAI-format models. |
 
 It also serves `GET /v1/models` (curated discovery list) and `GET /healthz`.
@@ -66,7 +66,8 @@ The shim normalises requests so Copilot accepts them:
    keeps only the standard Messages fields.
 
 4. **Reasoning effort.** For Responses-API models, Claude Code's
-   `output_config.effort` is mapped to `reasoning.effort` (`max → xhigh`).
+   `output_config.effort` is mapped to `reasoning.effort`. `max` is preserved for
+   GPT-5.6 and GPT-6 Astra and clamped to `xhigh` for models whose ceiling is lower.
 
 5. **Canonical ids.** Copilot uses dotted ids (`claude-opus-4.8`); Claude Code's
    model registry recognises dashed ids (`claude-opus-4-8`). The discovery list
@@ -149,10 +150,11 @@ What happens to a single `POST /v1/messages` from Claude Code:
       POST api.githubcopilot.com/v1/messages  (Bearer + editor headers)
       pipe Copilot's response/stream straight back  (no response parsing)
 
-4b. RESPONSES path (gpt-5.5):
+4b. RESPONSES path (GPT-5.5, GPT-5.6, GPT-6 Astra):
       anthropicToResponses(body)           # messages→input, system→instructions,
                                            # max_tokens→max_output_tokens,
-                                           # output_config.effort→reasoning.effort (max→xhigh),
+                                           # output_config.effort→reasoning.effort,
+                                           # max preserved where supported, otherwise →xhigh,
                                            # tools→function tools, tool_choice→Responses,
                                            # tool_use/tool_result history→function_call/_output
       GET /token ; POST /v1/responses

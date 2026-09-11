@@ -1,6 +1,7 @@
 // Unit tests for the configuration health checks and token-expiry parsing.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   diffEnvBlock,
   parseModelVersion,
@@ -15,40 +16,52 @@ import { tokenExpiryMs } from "../src/shim.mjs";
 function cfg(overrides = {}) {
   return {
     shimPort: 4142,
-    aliases: { opus: "claude-opus-5[1m]", haiku: "claude-haiku-4-5" },
-    tierLabels: {},
-    customModelOption: null,
+    aliases: {
+      opus: "claude-opus-4-8[1m]",
+      haiku: "claude-haiku-4-5",
+      fable: "gpt-6-astra[1m]",
+      "gpt-56-sol-ultra": "gpt-5.6-sol",
+    },
+    tierLabels: { fable: { name: "GPT-6 Astra", description: "GPT-6 Astra via GitHub Copilot - 1M context" } },
+    customModelOption: {
+      id: "gpt-56-sol-ultra[1m]",
+      name: "GPT-5.6 Sol Ultra (1M)",
+      description: "GPT-5.6 Sol via GitHub Copilot - max reasoning, 1M context",
+    },
+    defaultModel: "gpt-56-sol-ultra[1m]",
     ...overrides,
   };
 }
 
 /* ------------------------------ diffEnvBlock ------------------------------- */
 
-test("diffEnvBlock reports nothing when settings match the config", () => {
-  const c = cfg();
-  const env = {
+function matchingEnv() {
+  return {
     CLAUDE_CODE_USE_FOUNDRY: "1",
     ANTHROPIC_FOUNDRY_BASE_URL: "http://localhost:4142",
     ANTHROPIC_FOUNDRY_API_KEY: "cc-copilot",
-    ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5[1m]",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-4-8[1m]",
     ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-4-5",
+    ANTHROPIC_DEFAULT_FABLE_MODEL: "gpt-6-astra[1m]",
+    ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: "GPT-6 Astra",
+    ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION: "GPT-6 Astra via GitHub Copilot - 1M context",
+    ANTHROPIC_CUSTOM_MODEL_OPTION: "gpt-56-sol-ultra[1m]",
+    ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: "GPT-5.6 Sol Ultra (1M)",
+    ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: "GPT-5.6 Sol via GitHub Copilot - max reasoning, 1M context",
   };
-  assert.deepEqual(diffEnvBlock(c, env), []);
+}
+
+test("diffEnvBlock reports nothing when settings match the config", () => {
+  assert.deepEqual(diffEnvBlock(cfg(), matchingEnv()), []);
 });
 
 test("diffEnvBlock catches a stale tier mapping — the models.json edit that never applied", () => {
-  const env = {
-    CLAUDE_CODE_USE_FOUNDRY: "1",
-    ANTHROPIC_FOUNDRY_BASE_URL: "http://localhost:4142",
-    ANTHROPIC_FOUNDRY_API_KEY: "cc-copilot",
-    ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-4-8[1m]", // stale
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-4-5",
-  };
+  const env = { ...matchingEnv(), ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5[1m]" };
   const drift = diffEnvBlock(cfg(), env);
   assert.deepEqual(drift, [{
     key: "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    expected: "claude-opus-5[1m]",
-    actual: "claude-opus-4-8[1m]",
+    expected: "claude-opus-4-8[1m]",
+    actual: "claude-opus-5[1m]",
   }]);
 });
 
@@ -108,15 +121,28 @@ test("checkModels does not compare across families", () => {
   assert.deepEqual(checkModels(["claude-haiku-4.5"], UPSTREAM).newer, [], "opus-5 is not a haiku upgrade");
 });
 
+/* ------------------------------ bundled config ----------------------------- */
+
+test("bundled config exposes Astra while keeping Sol Ultra as the default", () => {
+  const models = JSON.parse(fs.readFileSync(new URL("../config/models.json", import.meta.url), "utf8"));
+  assert.equal(models.aliases.fable, "gpt-6-astra[1m]");
+  assert.equal(models.tierLabels.fable.name, "GPT-6 Astra");
+  assert.equal(models.aliases.opus, "claude-opus-4-8[1m]");
+  assert.equal(models.customModelOption.id, "gpt-56-sol-ultra[1m]");
+  assert.equal(models.defaultModel, "gpt-56-sol-ultra[1m]");
+  assert.ok(models.responsesApiModels.includes("gpt-6-astra"));
+  assert.equal(models.reasoningEffortOverrides["gpt-56-sol-ultra"], "max");
+  assert.equal(models.reasoningEffortOverrides.fable, undefined);
+});
+
 /* --------------------------- configuredModelIds ---------------------------- */
 
-test("configuredModelIds resolves aliases and strips the [1m] suffix", () => {
-  const ids = configuredModelIds(cfg({
-    aliases: { opus: "claude-opus-5[1m]", fable: "gpt-56-sol-ultra[1m]", "gpt-56-sol-ultra": "gpt-5.6-sol" },
-    customModelOption: { id: "gpt-5.6-sol[1m]" },
-  }));
-  assert.ok(ids.includes("claude-opus-5"));
-  assert.ok(ids.includes("gpt-5.6-sol"), "chained alias must resolve to the real id");
+test("configuredModelIds resolves aliases from tiers, custom option, and default", () => {
+  const ids = configuredModelIds(cfg());
+  assert.ok(ids.includes("claude-opus-4-8"));
+  assert.ok(ids.includes("gpt-6-astra"));
+  assert.ok(ids.includes("gpt-5.6-sol"), "custom/default alias must resolve to the real id");
+  assert.ok(!ids.includes("gpt-56-sol-ultra"), "virtual aliases must not reach upstream health checks");
   assert.ok(!ids.some((i) => i.includes("[1m]")), "no [1m] suffixes should leak through");
 });
 

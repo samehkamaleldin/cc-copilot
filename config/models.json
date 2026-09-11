@@ -6,7 +6,7 @@
   },
   "//aliases": "Claude Code tier aliases -> real Copilot model id. Dashed canonical ids make Claude Code label them correctly (e.g. 'Opus 4.8'). The [1m] suffix asks Claude Code to budget the 1M context window; the shim strips it before the request reaches Copilot.",
   "aliases": {
-    "opus": "claude-opus-5[1m]",
+    "opus": "claude-opus-4-8[1m]",
     "sonnet": "claude-sonnet-5[1m]",
     "haiku": "claude-haiku-4-5",
     "fable": "gpt-6-astra[1m]",
@@ -21,23 +21,22 @@
   },
   "//tierLabels": "Optional display name/description for a tier row in Claude Code's /model picker (ANTHROPIC_DEFAULT_<TIER>_MODEL_NAME/_DESCRIPTION). Used when a tier is repurposed to a non-obvious model (e.g. Fable -> a GPT model).",
   "tierLabels": {
-    "fable": { "name": "GPT-6 Astra (1M)", "description": "GPT-6 Astra via GitHub Copilot — 1M context, effort set by /effort" }
+    "fable": { "name": "GPT-6 Astra", "description": "GPT-6 Astra via GitHub Copilot - 1M context" }
   },
-  "//customModelOption": "One extra row added to Claude Code's /model picker via ANTHROPIC_CUSTOM_MODEL_OPTION. Foundry mode supports a single custom option; additional models remain reachable by typing their id in /model. The [1m] suffix budgets the 1M window (stripped by the shim before Copilot). This slot exposes Claude Opus 4.8 (1M) alongside the default Opus 5 tier.",
+  "//customModelOption": "One extra row added to Claude Code's /model picker via ANTHROPIC_CUSTOM_MODEL_OPTION. Foundry mode supports a single custom option; additional models remain reachable by typing their id in /model. The [1m] suffix budgets the 1M window (stripped by the shim before Copilot). This slot exposes Sol Ultra while keeping it as the new-session default.",
   "customModelOption": {
-    "id": "claude-opus-4-8[1m]",
-    "name": "Claude Opus 4.8 (1M)",
-    "description": "Claude Opus 4.8 via GitHub Copilot — 1M context"
+    "id": "gpt-56-sol-ultra[1m]",
+    "name": "GPT-5.6 Sol Ultra (1M)",
+    "description": "GPT-5.6 Sol via GitHub Copilot - max reasoning, 1M context"
   },
   "//defaultModel": "Session default written to the Claude `model` setting.",
-  "defaultModel": "opus",
+  "defaultModel": "gpt-56-sol-ultra[1m]",
 
   "//responsesApiModels": "Models that ONLY work on Copilot's /v1/responses endpoint (OpenAI Responses API). The shim translates Anthropic Messages <-> Responses for these.",
   "responsesApiModels": ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra"],
 
   "//discovery": "Curated model list exposed on GET /v1/models. `id` matches copilot-api's upstream (dotted) id; `canonical` is the dashed id Claude Code recognises. Non-claude ids are re-exposed under a synthetic 'anthropic-copilot-' prefix so Claude Code's gateway discovery keeps them. Discovery is OFF in Foundry mode (the default), so this is used only if you switch to gateway mode.",
   "discovery": [
-    { "id": "claude-opus-5",   "canonical": "claude-opus-5",    "name": "Claude Opus 5" },
     { "id": "claude-opus-4.8",  "canonical": "claude-opus-4-8",  "name": "Claude Opus 4.8" },
     { "id": "claude-sonnet-5",  "canonical": "claude-sonnet-5",  "name": "Claude Sonnet 5" },
     { "id": "claude-haiku-4.5", "canonical": "claude-haiku-4-5", "name": "Claude Haiku 4.5" },

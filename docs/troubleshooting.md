@@ -91,8 +91,8 @@ the status line shows `… / 1M`. The shim strips `[1m]` before calling Copilot.
 - If you added a custom alias whose **value** ends in `[1m]`, make sure you're on
   a current build — the shim strips `[1m]` both before and after alias resolution.
   ([gotchas §2.3](gotchas.md#23-alias-values-carry-1m--strip-after-aliasing-too))
-- For `gpt-5.5` (or any Responses model), an **empty** reply with a small
-  `max_tokens` and high effort is expected: reasoning consumed the output budget.
+- For any Responses model, an **empty** reply with a small `max_tokens` and high
+  effort is expected: reasoning consumed the output budget.
   Raise `max_tokens` / lower effort.
   ([gotchas §6.3](gotchas.md#63-low-max_tokens--high-effort--empty-output))
 
@@ -101,7 +101,7 @@ the status line shows `… / 1M`. The shim strips `[1m]` before calling Copilot.
 Known limitation. Claude Code sends effort in `output_config`, which the shim
 drops on the native Claude path (Copilot's `/v1/messages` rejects it). Claude
 models use Copilot's default reasoning; only adaptive `thinking` is forwarded.
-Effort *does* work for `gpt-5.5` (Responses path).
+Effort *does* work for GPT models on the Responses path.
 ([gotchas §6.2](gotchas.md#62-claude-models-dont-get-the-effort-level-forwarded))
 
 ## Streaming hangs, truncates, or drops `message_start`
