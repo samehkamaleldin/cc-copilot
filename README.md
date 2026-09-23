@@ -4,8 +4,8 @@
 
 cc-copilot runs a small local proxy that translates between Claude Code and
 GitHub Copilot's model API, and wires Claude Code up to use it with **no
-claude.ai login required**. You get Claude (Opus 4.8, Sonnet 5, Haiku 4.5),
-GPT-6 Astra, and GPT-5.6 Sol, all billed through your existing Copilot subscription.
+claude.ai login required**. You get Claude (Opus 5.5, Sonnet 5, Haiku 4.5),
+GPT-6 Astra/Sol/Luna, and GPT-5.6 Sol, all billed through your existing Copilot subscription.
 
 ```
 ┌────────────┐   Anthropic Messages    ┌────────── cc-copilot ──────────┐   GitHub Copilot
@@ -55,13 +55,15 @@ Then just run **`claude`** — no login screen, and the `/model` picker offers:
 
 | Picker entry | Model                 | Notes                            |
 | ------------ | --------------------- | -------------------------------- |
-| `opus`       | Claude Opus 4.8       | 1M context                       |
+| `opus`       | Claude Opus 5.5       | 1M context                       |
 | `sonnet`     | Claude Sonnet 5       | 1M context                       |
 | `haiku`      | Claude Haiku 4.5      | fast / background                |
 | `fable`      | GPT-6 Astra           | 1M context, reasoning effort     |
-| custom row   | GPT-5.6 Sol Ultra     | 1M context, max effort, default  |
+| custom row   | GPT-6 Sol             | 1M context, reasoning effort     |
 
-New sessions default to Sol Ultra. Switch in-session with `/model sonnet`, `/model fable`, etc.
+New sessions default to GPT-5.6 Sol Ultra (max effort, 1M). Switch in-session
+with `/model sonnet`, `/model fable`, etc. Models without a picker row are still
+reachable by id, e.g. `/model gpt-6-luna[1m]` or `/model gpt-56-sol-ultra[1m]`.
 
 ---
 

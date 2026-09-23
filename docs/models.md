@@ -23,14 +23,16 @@ User config is merged over the bundled defaults. After editing, run
   // Dashed ids (claude-opus-4-8) make Claude Code label them correctly.
   // The [1m] suffix asks Claude Code to budget the 1M window; the shim strips it.
   "aliases": {
-    "opus":   "claude-opus-4-8[1m]",
+    "opus":   "claude-opus-5-5[1m]",
     "sonnet": "claude-sonnet-5[1m]",
     "haiku":  "claude-haiku-4-5",
     "fable":  "gpt-6-astra[1m]",
     "gpt-56-sol":       "gpt-5.6-sol",
     "gpt-56-sol-ultra": "gpt-5.6-sol",
     "gpt-56-luna":      "gpt-5.6-luna",
-    "gpt-56-terra":     "gpt-5.6-terra"
+    "gpt-56-terra":     "gpt-5.6-terra",
+    "gpt-6-sol":        "gpt-6-sol",
+    "gpt-6-luna":       "gpt-6-luna"
   },
 
   // Virtual aliases that force a Responses API reasoning effort.
@@ -42,20 +44,24 @@ User config is merged over the bundled defaults. After editing, run
   "defaultModel": "gpt-56-sol-ultra[1m]",
 
   // Models that ONLY work on Copilot's /v1/responses endpoint.
-  "responsesApiModels": ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra"],
+  "responsesApiModels": ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
 
-  // Optional display name/description for a repurposed tier row in the /model
-  // picker (emits ANTHROPIC_DEFAULT_<TIER>_MODEL_NAME/_DESCRIPTION).
+  // Optional display name/description for a tier row in the /model picker
+  // (emits ANTHROPIC_DEFAULT_<TIER>_MODEL_NAME/_DESCRIPTION). Without a label,
+  // Claude Code shows the raw id (e.g. "claude-opus-5-5[1m]").
   "tierLabels": {
-    "fable": { "name": "GPT-6 Astra", "description": "GPT-6 Astra via GitHub Copilot - 1M context" }
+    "opus":   { "name": "Claude Opus 5.5 (1M)", "description": "Claude Opus 5.5 via GitHub Copilot - 1M context" },
+    "sonnet": { "name": "Claude Sonnet 5 (1M)", "description": "Claude Sonnet 5 via GitHub Copilot - 1M context" },
+    "haiku":  { "name": "Claude Haiku 4.5", "description": "Claude Haiku 4.5 via GitHub Copilot - fast / background" },
+    "fable":  { "name": "GPT-6 Astra", "description": "GPT-6 Astra via GitHub Copilot - 1M context" }
   },
 
   // One extra /model picker row (Foundry supports a single custom option).
   // Emits ANTHROPIC_CUSTOM_MODEL_OPTION[_NAME|_DESCRIPTION].
   "customModelOption": {
-    "id": "gpt-56-sol-ultra[1m]",
-    "name": "GPT-5.6 Sol Ultra (1M)",
-    "description": "GPT-5.6 Sol via GitHub Copilot - max reasoning, 1M context"
+    "id": "gpt-6-sol[1m]",
+    "name": "GPT-6 Sol (1M)",
+    "description": "GPT-6 Sol via GitHub Copilot - 1M context"
   },
 
   // Curated /v1/models discovery list (only used in gateway mode).
@@ -84,25 +90,33 @@ User config is merged over the bundled defaults. After editing, run
   "CLAUDE_CODE_USE_FOUNDRY": "1",
   "ANTHROPIC_FOUNDRY_BASE_URL": "http://localhost:4142",
   "ANTHROPIC_FOUNDRY_API_KEY": "cc-copilot",
-  "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8[1m]",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5-5[1m]",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Claude Opus 5.5 (1M)",
   "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5[1m]",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Claude Sonnet 5 (1M)",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Claude Haiku 4.5",
   "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-6-astra[1m]",
   "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "GPT-6 Astra",
-  "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "GPT-6 Astra via GitHub Copilot - 1M context",
-  "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-56-sol-ultra[1m]",
-  "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-5.6 Sol Ultra (1M)",
-  "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "GPT-5.6 Sol via GitHub Copilot - max reasoning, 1M context"
+  "ANTHROPIC_CUSTOM_MODEL_OPTION": "gpt-6-sol[1m]",
+  "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GPT-6 Sol (1M)",
+  "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "GPT-6 Sol via GitHub Copilot - 1M context"
+  // ...plus a *_DESCRIPTION for each labelled tier
 }
 ```
 
 So in Claude Code:
-- `/model opus` → `claude-opus-4-8[1m]`
-- `/model sonnet` → `claude-sonnet-5[1m]`
-- `/model haiku` → `claude-haiku-4-5`
+- `/model opus` → `claude-opus-5-5[1m]` (shows as **Claude Opus 5.5 (1M)**)
+- `/model sonnet` → `claude-sonnet-5[1m]` (shows as **Claude Sonnet 5 (1M)**)
+- `/model haiku` → `claude-haiku-4-5` (shows as **Claude Haiku 4.5**)
 - `/model fable` → `gpt-6-astra[1m]` (shows as **GPT-6 Astra**)
-- **GPT-5.6 Sol Ultra (1M)** custom row → `gpt-56-sol-ultra[1m]`
-- New sessions default directly to `gpt-56-sol-ultra[1m]`
+- **GPT-6 Sol (1M)** custom row → `gpt-6-sol[1m]`
+- New sessions default directly to `gpt-56-sol-ultra[1m]` (no picker row; while
+  it's the active model Claude Code shows it as an extra row, and you can
+  always select it with `/model gpt-56-sol-ultra[1m]`)
+
+Claude Code's picker also adds its own **Default** row, plus a temporary row for
+the current session's model when that model isn't one of the configured slots.
 
 You can also select a model by full id, e.g. `/model claude-opus-4-8`, or type
 any GPT-5.6 alias directly: `/model gpt-56-terra` (200K) or

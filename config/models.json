@@ -23,13 +23,16 @@
   },
   "//tierLabels": "Optional display name/description for a tier row in Claude Code's /model picker (ANTHROPIC_DEFAULT_<TIER>_MODEL_NAME/_DESCRIPTION). Used when a tier is repurposed to a non-obvious model (e.g. Fable -> a GPT model).",
   "tierLabels": {
+    "opus": { "name": "Claude Opus 5.5 (1M)", "description": "Claude Opus 5.5 via GitHub Copilot - 1M context" },
+    "sonnet": { "name": "Claude Sonnet 5 (1M)", "description": "Claude Sonnet 5 via GitHub Copilot - 1M context" },
+    "haiku": { "name": "Claude Haiku 4.5", "description": "Claude Haiku 4.5 via GitHub Copilot - fast / background" },
     "fable": { "name": "GPT-6 Astra", "description": "GPT-6 Astra via GitHub Copilot - 1M context" }
   },
-  "//customModelOption": "One extra row added to Claude Code's /model picker via ANTHROPIC_CUSTOM_MODEL_OPTION. Foundry mode supports a single custom option; additional models remain reachable by typing their id in /model. The [1m] suffix budgets the 1M window (stripped by the shim before Copilot). This slot exposes Sol Ultra while keeping it as the new-session default.",
+  "//customModelOption": "One extra row added to Claude Code's /model picker via ANTHROPIC_CUSTOM_MODEL_OPTION. Foundry mode supports a single custom option; additional models remain reachable by typing their id in /model. The [1m] suffix budgets the 1M window (stripped by the shim before Copilot).   This slot exposes GPT-6 Sol; Sol Ultra stays the new-session default (reachable via /model gpt-56-sol-ultra[1m]).",
   "customModelOption": {
-    "id": "gpt-56-sol-ultra[1m]",
-    "name": "GPT-5.6 Sol Ultra (1M)",
-    "description": "GPT-5.6 Sol via GitHub Copilot - max reasoning, 1M context"
+      "id": "gpt-6-sol[1m]",
+      "name": "GPT-6 Sol (1M)",
+      "description": "GPT-6 Sol via GitHub Copilot - 1M context"
   },
   "//defaultModel": "Session default written to the Claude `model` setting.",
   "defaultModel": "gpt-56-sol-ultra[1m]",

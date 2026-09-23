@@ -123,14 +123,15 @@ test("checkModels does not compare across families", () => {
 
 /* ------------------------------ bundled config ----------------------------- */
 
-test("bundled config exposes Astra while keeping Sol Ultra as the default", () => {
+test("bundled config exposes Astra and GPT-6 Sol while keeping Sol Ultra as the default", () => {
   const models = JSON.parse(fs.readFileSync(new URL("../config/models.json", import.meta.url), "utf8"));
   assert.equal(models.aliases.fable, "gpt-6-astra[1m]");
   assert.equal(models.tierLabels.fable.name, "GPT-6 Astra");
-  assert.equal(models.aliases.opus, "claude-opus-4-8[1m]");
-  assert.equal(models.customModelOption.id, "gpt-56-sol-ultra[1m]");
+  assert.equal(models.aliases.opus, "claude-opus-5-5[1m]");
+  assert.equal(models.tierLabels.opus.name, "Claude Opus 5.5 (1M)");
+  assert.equal(models.customModelOption.id, "gpt-6-sol[1m]");
   assert.equal(models.defaultModel, "gpt-56-sol-ultra[1m]");
-  assert.ok(models.responsesApiModels.includes("gpt-6-astra"));
+  for (const id of ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]) assert.ok(models.responsesApiModels.includes(id));
   assert.equal(models.reasoningEffortOverrides["gpt-56-sol-ultra"], "max");
   assert.equal(models.reasoningEffortOverrides.fable, undefined);
 });
